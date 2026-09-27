@@ -1,6 +1,12 @@
 // An MCP server over stdio, so that an AI coding agent can drive the VVD and
 // see what it did: press remote keys, look at the screen, wait for it to
 // change, record a video and check the TV safe area.
+//
+// A model chooses the arguments, so they are bounded: how many keys a call
+// presses, how long it waits or records, and which files it may write. A call
+// that the client cancels stops.
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
@@ -12,6 +18,17 @@ import { parseKeys } from './keys.ts';
 import { record } from './record.ts';
 import { checkSafeArea, formatColour, parseColour } from './safearea.ts';
 import { VERSION } from './version.ts';
+
+// Presses per call: 100 at the default gap take about 54 seconds.
+export const MAX_PRESSES = 100;
+
+export type ServerOptions = {
+  // Drive this emulator instead of the newest.
+  pid?: number;
+  // Where to look for discovery files and the proto; replaceable in tests.
+  directories?: string[];
+  protoDirectory?: string;
+};
 
 const text = (value: string): CallToolResult => ({
   content: [{ type: 'text', text: value }],
@@ -25,23 +42,52 @@ const failure = (error: unknown): CallToolResult => ({
 const sleep = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-export const createServer = (): McpServer => {
-  const server = new McpServer({ name: 'vega-vvd-driver', version: VERSION });
+// A path a model may record to: a local file with a video extension, and not
+// one that exists unless it asks to replace it. Relative paths resolve against
+// the server's working directory.
+export const videoPath = (file: string, overwrite = false): string => {
+  if (/^[a-z][a-z0-9+.-]*:/i.test(file))
+    throw new Error('file must be a local path, not a URL');
+  const path = resolve(file);
+  if (!/\.(mp4|mov|mkv)$/i.test(path))
+    throw new Error('file must end in .mp4, .mov or .mkv');
+  if (!overwrite && existsSync(path))
+    throw new Error(`${path} exists; set overwrite to replace it`);
+  return path;
+};
 
-  // One connection, kept while the same emulator runs; a restarted VVD gets a
-  // new one.
+export const createServer = (options: ServerOptions = {}): McpServer => {
+  const server = new McpServer({ name: 'vega-vvd-driver', version: VERSION });
+  const find = { pid: options.pid, directories: options.directories };
+
+  // One connection, kept while the same emulator serves the same endpoint; a
+  // restarted VVD, or gRPC turned on again, gets a new one.
   let device: Device | undefined;
   const connected = (): Device => {
-    const [newest] = findEmulators();
-    if (device && newest && device.emulator.pid === newest.pid) return device;
+    const [newest] = findEmulators(find);
+    const current = device?.emulator;
+    if (
+      device &&
+      current &&
+      newest &&
+      current.pid === newest.pid &&
+      current.grpcPort === newest.grpcPort &&
+      current.grpcToken === newest.grpcToken
+    )
+      return device;
     device?.close();
-    device = Device.connect();
+    device = undefined; // a failed connect below must not leave it cached
+    device = Device.connect({
+      ...find,
+      protoDirectory: options.protoDirectory,
+    });
     return device;
   };
   const screen = async (
     d: Device,
+    signal: AbortSignal,
   ): Promise<CallToolResult['content'][number]> => {
-    const frame = await d.screenshot('png');
+    const frame = await d.screenshot('png', { signal });
     return {
       type: 'image',
       data: frame.data.toString('base64'),
@@ -58,7 +104,7 @@ export const createServer = (): McpServer => {
       annotations: { readOnlyHint: true },
     },
     async () => {
-      const devices = findEmulators().map(
+      const devices = findEmulators({ directories: options.directories }).map(
         ({ pid, grpcPort, consolePort, avdName }) => ({
           pid,
           grpcPort,
@@ -80,27 +126,28 @@ export const createServer = (): McpServer => {
         grpc_port: z
           .number()
           .int()
-          .min(1)
+          .min(1024)
           .max(65535)
           .optional()
           .describe('Default 8554'),
         console_port: z
           .number()
           .int()
-          .min(1)
-          .max(65535)
+          .min(5554)
+          .max(5682)
+          .multipleOf(2)
           .optional()
-          .describe('Default 5554'),
+          .describe('The emulator console, an even port; default 5554'),
       },
     },
     async ({ grpc_port, console_port }) => {
       try {
         await enableGrpc(grpc_port ?? 8554, { port: console_port });
-        for (let i = 0; i < 20 && findEmulators().length === 0; i++)
-          await sleep(250);
-        const found = findEmulators().length;
+        const found = () =>
+          findEmulators({ directories: options.directories }).length;
+        for (let i = 0; i < 20 && found() === 0; i++) await sleep(250);
         return text(
-          found
+          found()
             ? `gRPC is on at port ${grpc_port ?? 8554}.`
             : 'The console accepted the command, but no discovery file appeared yet.',
         );
@@ -114,12 +161,12 @@ export const createServer = (): McpServer => {
     'press_keys',
     {
       title: 'Press remote keys',
-      description:
-        'Presses TV remote keys in order: up, down, left, right, ok, back, menu, playpause, rewind, fastforward, a KEY_* name or an evdev code. Append *N to repeat (down*3), :down or :up to hold or release. Set screenshot_after to see the result.',
+      description: `Presses TV remote keys in order: up, down, left, right, ok, back, menu, playpause, rewind, fastforward, a KEY_* name or an evdev code. Append *N to repeat (down*3), :down or :up to hold or release. At most ${MAX_PRESSES} presses per call. Home cannot be pressed on the Virtual Device. Set screenshot_after to see the result.`,
       inputSchema: {
         keys: z
-          .array(z.string())
+          .array(z.string().min(1).max(40))
           .min(1)
+          .max(50)
           .describe('For example ["down", "down", "ok"]'),
         gap_ms: z
           .number()
@@ -134,13 +181,17 @@ export const createServer = (): McpServer => {
           .describe('Return a screenshot once the keys are pressed'),
       },
     },
-    async ({ keys, gap_ms, screenshot_after }) => {
+    async ({ keys, gap_ms, screenshot_after }, { signal }) => {
       try {
         const steps = parseKeys(keys); // a typo fails before any device is touched
+        if (steps.length > MAX_PRESSES)
+          throw new Error(
+            `${steps.length} presses asked for; at most ${MAX_PRESSES} per call`,
+          );
         const d = connected();
-        await d.press(steps, { gapMs: gap_ms });
+        await d.press(steps, { gapMs: gap_ms, signal });
         const done = text(`Pressed ${keys.join(' ')}.`);
-        if (screenshot_after) done.content.push(await screen(d));
+        if (screenshot_after) done.content.push(await screen(d, signal));
         return done;
       } catch (error) {
         return failure(error);
@@ -156,9 +207,9 @@ export const createServer = (): McpServer => {
         'Returns the current screen of the Vega Virtual Device as a PNG image (1920x1080).',
       annotations: { readOnlyHint: true },
     },
-    async () => {
+    async ({ signal }) => {
       try {
-        return { content: [await screen(connected())] };
+        return { content: [await screen(connected(), signal)] };
       } catch (error) {
         return failure(error);
       }
@@ -182,16 +233,19 @@ export const createServer = (): McpServer => {
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ timeout_ms }) => {
+    async ({ timeout_ms }, { signal }) => {
       try {
         const d = connected();
-        const changed = await d.waitForChange({ timeoutMs: timeout_ms });
+        const changed = await d.waitForChange({
+          timeoutMs: timeout_ms,
+          signal,
+        });
         const result = text(
           changed
             ? 'The screen changed.'
             : 'The screen did not change before the timeout.',
         );
-        result.content.push(await screen(d));
+        result.content.push(await screen(d, signal));
         return result;
       } catch (error) {
         return failure(error);
@@ -204,17 +258,34 @@ export const createServer = (): McpServer => {
     {
       title: 'Record a video with sound',
       description:
-        'Records the screen and the sound of the Vega Virtual Device to an MP4 file, at 1080p. Needs ffmpeg on the PATH. Blocks for the whole duration.',
+        'Records the screen and the sound of the Vega Virtual Device to a video file, at 1080p. Needs ffmpeg on the PATH. Blocks for the whole duration; cancelling the call stops the recording.',
       inputSchema: {
-        file: z.string().min(1).describe('Where to write the MP4'),
+        file: z
+          .string()
+          .min(1)
+          .max(1024)
+          .describe(
+            "A local .mp4, .mov or .mkv path, absolute or relative to the server's working directory",
+          ),
         seconds: z.number().min(1).max(600),
         fps: z.number().int().min(1).max(60).optional().describe('Default 30'),
         audio: z.boolean().optional().describe('Default true'),
+        overwrite: z
+          .boolean()
+          .optional()
+          .describe('Replace an existing file; default false'),
       },
     },
-    async ({ file, seconds, fps, audio }) => {
+    async ({ file, seconds, fps, audio, overwrite }, { signal }) => {
       try {
-        const result = await record(connected(), { file, seconds, fps, audio });
+        const path = videoPath(file, overwrite);
+        const result = await record(connected(), {
+          file: path,
+          seconds,
+          fps,
+          audio,
+          signal,
+        });
         return text(
           `Recorded ${result.file}: ${result.frames} frames, ${result.audioSeconds.toFixed(1)} s of audio.`,
         );
@@ -233,6 +304,7 @@ export const createServer = (): McpServer => {
       inputSchema: {
         background: z
           .string()
+          .max(7)
           .optional()
           .describe('#rrggbb; the most common margin colour by default'),
         margin: z
@@ -244,9 +316,9 @@ export const createServer = (): McpServer => {
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ background, margin }) => {
+    async ({ background, margin }, { signal }) => {
       try {
-        const frame = await connected().screenshot('rgb');
+        const frame = await connected().screenshot('rgb', { signal });
         const report = checkSafeArea(frame.data, frame.width, frame.height, {
           background: background ? parseColour(background) : undefined,
           margin,
@@ -269,6 +341,8 @@ export const createServer = (): McpServer => {
   return server;
 };
 
-export const serveStdio = async (): Promise<void> => {
-  await createServer().connect(new StdioServerTransport());
+export const serveStdio = async (
+  options: ServerOptions = {},
+): Promise<void> => {
+  await createServer(options).connect(new StdioServerTransport());
 };

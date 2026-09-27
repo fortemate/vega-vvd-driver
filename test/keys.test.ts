@@ -39,3 +39,9 @@ test('unknown or malformed keys are refused before anything is sent', () => {
   assert.throws(() => parseKey('down*101'), KeyError);
   assert.throws(() => parseKey('0'), KeyError);
 });
+
+test('names from the object prototype are not keys', () => {
+  for (const name of ['constructor', '__proto__', 'toString', 'hasOwnProperty'])
+    assert.throws(() => parseKey(name), KeyError, name);
+  assert.throws(() => parseKey('constructor*3'), KeyError);
+});

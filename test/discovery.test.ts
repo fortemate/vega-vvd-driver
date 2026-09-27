@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { inspect } from 'node:util';
 import {
   findEmulator,
   findEmulators,
@@ -84,17 +85,42 @@ test('no emulator is a clear error that says how to turn gRPC on', () => {
   );
 });
 
-test('discovery looks in the macOS and Linux locations', () => {
-  const dirs = runningDirectories(
-    { XDG_RUNTIME_DIR: '/run/user/1000' },
-    '/home/me',
+test('discovery looks in the macOS and Linux locations, each once', () => {
+  const system = { uid: 1000, user: 'me', tmp: '/var/tmp' };
+  assert.deepEqual(
+    runningDirectories(
+      { XDG_RUNTIME_DIR: '/run/user/1000' },
+      '/home/me',
+      system,
+    ),
+    [
+      '/home/me/Library/Caches/TemporaryItems/avd/running',
+      '/run/user/1000/avd/running',
+      '/tmp/android-me/avd/running',
+      '/var/tmp/android-me/avd/running',
+      '/home/me/.android/avd/running',
+    ],
   );
-  assert.deepEqual(dirs, [
-    '/home/me/Library/Caches/TemporaryItems/avd/running',
-    '/run/user/1000/avd/running',
-    '/home/me/.android/avd/running',
-  ]);
-  assert.equal(runningDirectories({}, '/home/me').length, 2);
+  assert.deepEqual(
+    runningDirectories({}, '/home/me', {
+      uid: undefined,
+      user: undefined,
+      tmp: '/tmp',
+    }),
+    [
+      '/home/me/Library/Caches/TemporaryItems/avd/running',
+      '/home/me/.android/avd/running',
+    ],
+  );
+});
+
+test('the token is readable but stays out of JSON, inspect and spreads', () => {
+  const dir = directory({ 'pid_4242.ini': INI });
+  const [emulator] = findEmulators({ directories: [dir], alive: () => true });
+  assert.equal(emulator.grpcToken, 'secret-token');
+  assert.ok(!JSON.stringify(emulator).includes('secret-token'));
+  assert.ok(!JSON.stringify({ ...emulator }).includes('secret-token'));
+  assert.ok(!inspect(emulator).includes('secret-token'));
 });
 
 test('the proto is found through the SDK config, or VVD_PROTO_DIR', () => {
@@ -122,4 +148,34 @@ test('the proto is found through the SDK config, or VVD_PROTO_DIR', () => {
     () => findProtoDirectory({}, mkdtempSync(join(tmpdir(), 'vvd-empty-'))),
     /VVD_PROTO_DIR/,
   );
+});
+
+test('without a config, the newest installed version wins, and stray files are skipped', () => {
+  const home = mkdtempSync(join(tmpdir(), 'vvd-home-'));
+  const sdk = join(home, 'vega/sdk/vega-sdk');
+  const lib = (version: string) =>
+    join(sdk, 'main', version, 'vvd/images/tv/vmtools/agent/lib');
+  for (const version of ['0.9.1', '0.24.1']) {
+    mkdirSync(lib(version), { recursive: true });
+    writeFileSync(join(lib(version), 'emulator_controller.proto'), '');
+  }
+  // Finder leaves files like these next to the channel and version folders.
+  writeFileSync(join(sdk, '.DS_Store'), '');
+  writeFileSync(join(sdk, 'main', '.DS_Store'), '');
+  assert.equal(findProtoDirectory({}, home), lib('0.24.1'));
+});
+
+test('a config that names a version without the proto falls back to scanning', () => {
+  const home = mkdtempSync(join(tmpdir(), 'vvd-home-'));
+  const lib = join(
+    home,
+    'vega/sdk/vega-sdk/main/0.24.1/vvd/images/tv/vmtools/agent/lib',
+  );
+  mkdirSync(lib, { recursive: true });
+  writeFileSync(join(lib, 'emulator_controller.proto'), '');
+  writeFileSync(
+    join(home, 'vega/config.json'),
+    JSON.stringify({ sdkPath: join(home, 'gone'), defaultVersion: 'main@9.9' }),
+  );
+  assert.equal(findProtoDirectory({}, home), lib);
 });

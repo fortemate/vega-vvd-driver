@@ -6,9 +6,23 @@ Drive the Vega Virtual Device from scripts and AI agents: press remote keys, tak
 
 ## Why
 
-The Vega SDK's `vega` command installs and launches apps on the Vega Virtual Device (VVD), but it cannot press a remote key or take a screenshot. So every check of a Vega app's screen needed a person at the emulator, and an AI coding agent could build an app it could never see.
+The Vega SDK's `vega` command installs and launches apps on the Vega Virtual Device (VVD), but has no command to press a remote key or take a screenshot. Amazon's [Appium Vega driver](https://developer.amazon.com/docs/vega/0.24/appium-install.html) does both, and much more: it runs UI tests that find elements, on the VVD and on a Fire TV Stick. It needs an Appium 2 server, the driver package and the device's automation toolkit switched on, with Node 22 or earlier.
 
-The VVD is built on the Android emulator, which has its own gRPC API and console. This driver uses them. Its scripts were worked out while building [Dice Chess for Fire TV](https://github.com/fortemate/dicechess-tv): they drove whole sessions with nobody at the emulator, took every screenshot of the game's gallery, checked its move animations frame by frame and recorded its [demo video](https://www.youtube.com/watch?v=Q7wWAmUp2Sc). Both gaps are in that project's [friction log](https://fortemate.github.io/dicechess-tv/friction-log/) for Amazon, as FL-08 and FL-09.
+This driver is for lighter jobs on the VVD: a key press or a screenshot from a shell script, a video with sound, every frame of an animation, and an AI coding agent that can see what it built. It talks to the Android emulator that the VVD is built on, through the emulator's own gRPC API and console, so there is nothing to install on the device and no server to run.
+
+Its methods were worked out while building [Dice Chess for Fire TV](https://github.com/fortemate/dicechess-tv): scripts drove whole sessions with nobody at the emulator, took every screenshot of the game's gallery, checked its move animations frame by frame and recorded its [demo video](https://www.youtube.com/watch?v=Q7wWAmUp2Sc). The obstacles on the way are in that project's [friction log](https://fortemate.github.io/dicechess-tv/friction-log/) for Amazon, as FL-08, FL-09 and FL-28.
+
+## Appium or this driver?
+
+| To…                                                 | Use                    |
+| --------------------------------------------------- | ---------------------- |
+| find elements, read their text, run a test suite    | Appium                 |
+| test on a Fire TV Stick                             | Appium                 |
+| press keys or take a screenshot from a shell script | this driver, or Appium |
+| record a video with sound                           | this driver            |
+| capture every frame of an animation                 | this driver            |
+| let an AI agent see and operate the VVD over MCP    | this driver            |
+| check the TV safe area                              | this driver            |
 
 ## What you need
 
@@ -48,7 +62,7 @@ vvd record demo.mp4 --seconds 20
 | `vvd safe-area [--background #rrggbb] [--margin 0.05]`     | Counts what sits in the outer 5% of each edge. Exits 0 when clear                                                                                                                       |
 | `vvd mcp`                                                  | Runs the MCP server on stdio                                                                                                                                                            |
 
-Quote a repeated key in a shell, `'down*3'`, or zsh reads the `*` as a file pattern. Every command takes `--pid <n>` to pick one device when several run.
+Quote a repeated key in a shell, `'down*3'`, or zsh reads the `*` as a file pattern. When several devices run, `--pid <n>` picks one; `enable-grpc` picks a device's console with `--console-port` instead. Errors exit with 2, so that a script can tell them from "no change" and "not clear", which exit with 1.
 
 ## For AI agents: the MCP server
 
@@ -72,6 +86,8 @@ Other MCP clients start the command `vvd` with the argument `mcp`.
 
 Then ask, for example: "Open Settings in the app on the Virtual Device, turn the music off and show me the screen."
 
+A model chooses the arguments, so they are bounded: at most 100 key presses per call, recordings of up to 600 seconds, and `record_video` writes only a new `.mp4`, `.mov` or `.mkv` file, unless it is told to `overwrite` one. When the client cancels a call, its presses, wait or recording stop. `vvd mcp --pid <n>` ties the server to one device.
+
 ## As a library
 
 ```ts
@@ -88,7 +104,7 @@ await record(device, {
 device.close();
 ```
 
-`device.waitForChange()`, `device.frames()` and `checkSafeArea()` cover the rest. See `src/index.ts` for everything exported.
+`device.waitForChange()`, `device.frames()` and `checkSafeArea()` cover the rest. Every call has a deadline (10 seconds, or `callTimeoutMs` given to `Device.connect`), so a stuck emulator fails a call instead of hanging it. `press`, `waitForChange`, `frames` and `record` take an AbortSignal as `signal`, and a cancelled press still releases its key. `onStart` runs alongside the recording, which ends when both have. See `src/index.ts` for everything exported.
 
 ## Recipes
 
@@ -110,7 +126,7 @@ Measured on the VVD with Vega SDK 0.24.12112 on macOS:
 
 - **Keys.** The emulator's gRPC `sendKey`, with Linux evdev codes, reaches apps: it is the path the VVD's own on-screen remote uses. OK is `KEY_KPENTER`, and apps receive it as `kpenter`, not the `select` the remote's documentation names. `KEY_SELECT` and `KEY_OK` never arrive, because the emulator's virtual keyboard does not declare them. Back is `KEY_BACK`; `KEY_ESC` does not reach an app as Back.
 - **Dead ends.** The emulator console's `event send`, QEMU's `send-key` and `inputd-cli` on the device all report success and never reach an app.
-- **Home cannot be scripted.** Neither `KEY_HOMEPAGE` nor `KEY_F1` leaves an app. To get back to the launcher, run `vega device launch-app -d VirtualDevice -a com.amazon.keplerlauncherapp.main`.
+- **Home cannot be sent.** `KEY_HOMEPAGE` (172), `KEY_F1` and 170, the code Amazon's Appium documentation gives for Home, all leave the app on screen. To get back to the launcher, run `vega device launch-app -d VirtualDevice -a com.amazon.keplerlauncherapp.main`.
 - **Screenshots.** `getScreenshot` returns 1920x1080. A running process polls it at about 90 screenshots a second; `vvd screenshot` takes about half a second, most of it starting up. The emulator's `streamScreenshot` has delivered only its first frame while the screen kept changing, so the driver polls instead.
 - **Audio.** `streamAudio` sends nothing while the device is silent. `record` rebuilds the track on the video's clock from each packet's capture time and fills the gaps with silence, so a sound effect stays in sync.
 - **gRPC.** The endpoint is off after every start of the VVD, and the discovery file that the driver reads appears only once `grpc <port>` has been sent to the console. `vvd enable-grpc` does that.
@@ -120,18 +136,19 @@ Measured on the VVD with Vega SDK 0.24.12112 on macOS:
 - **"No running Vega Virtual Device with gRPC found."** Start the device, then run `vvd enable-grpc`.
 - **"emulator_controller.proto not found."** Set `VVD_PROTO_DIR` to the directory in your Vega SDK that holds it (`…/vvd/images/tv/vmtools/agent/lib`).
 - **Several devices.** Pick one with `--pid`, from `vvd devices`.
+- **"The Vega Virtual Device did not answer in time."** The emulator is busy or stuck. Restart the device if it keeps happening.
 - **`record` fails at once.** Install ffmpeg.
 
 ## How it works
 
 A running emulator with gRPC on writes `pid_<pid>.ini` into a per-user directory (`~/Library/Caches/TemporaryItems/avd/running` on macOS). It holds the gRPC port and a bearer token. The driver reads it, loads `emulator_controller.proto` from your own Vega SDK, and calls the emulator's `EmulatorController` service. To turn gRPC on, it signs in to the emulator console on port 5554 with the token in `~/.emulator_console_auth_token`.
 
-- Tokens are read at run time and never printed or logged.
+- Tokens are read at run time and never printed or logged. On the objects the library returns, the gRPC token is not enumerable, so it stays out of JSON and `util.inspect`. The console token goes only to a port that greets as an Android emulator console.
 - No file from the Vega SDK is copied or bundled: Amazon licenses the SDK to each developer. The proto is Android emulator code under Apache-2.0, and it is loaded from your installation.
 
 ## Development
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). In short: `mise run setup`, then `mise run check`; with a device running and gRPC on, `npm run test:device`.
+See [CONTRIBUTING.md](CONTRIBUTING.md). In short: `mise run setup`, then `mise run check`; with a device running and gRPC on, `npm run test:device`. The unit tests run the gRPC, console and recording paths against fakes, so they need neither a device nor ffmpeg.
 
 ## Licence
 

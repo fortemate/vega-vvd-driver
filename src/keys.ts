@@ -60,11 +60,12 @@ export class KeyError extends Error {
   }
 }
 
+// Own properties only: `constructor` or `__proto__` must not pass for a key.
 const codeOf = (name: string): number => {
   const lower = name.toLowerCase();
-  if (lower in REMOTE_KEYS) return KEY_CODES[REMOTE_KEYS[lower]];
+  if (Object.hasOwn(REMOTE_KEYS, lower)) return KEY_CODES[REMOTE_KEYS[lower]];
   const upper = name.toUpperCase();
-  if (upper in KEY_CODES) return KEY_CODES[upper];
+  if (Object.hasOwn(KEY_CODES, upper)) return KEY_CODES[upper];
   if (/^\d+$/.test(name)) {
     const code = Number(name);
     if (code > 0 && code < 0x300) return code;
