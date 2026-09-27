@@ -1,8 +1,17 @@
 // A connection to one running Vega Virtual Device over the emulator's gRPC
 // API (EmulatorController): remote keys, screenshots and the device's audio.
+//
+// Every call has a deadline, so a wedged emulator fails a command instead of
+// hanging it, and every long operation takes an AbortSignal.
 import { join } from 'node:path';
-import { credentials, loadPackageDefinition, Metadata } from '@grpc/grpc-js';
-import type { Client, ServiceError } from '@grpc/grpc-js';
+import { setTimeout as sleep } from 'node:timers/promises';
+import {
+  credentials,
+  loadPackageDefinition,
+  Metadata,
+  status,
+} from '@grpc/grpc-js';
+import type { Client, ClientUnaryCall, ServiceError } from '@grpc/grpc-js';
 import { loadSync } from '@grpc/proto-loader';
 import {
   findEmulator,
@@ -12,9 +21,15 @@ import {
 } from './discovery.ts';
 import { parseKeys, type KeyStep } from './keys.ts';
 
+// How long one call may take by default. A 1080p PNG takes about half a
+// second on the VVD.
+export const CALL_TIMEOUT_MS = 10_000;
+
 export type ConnectOptions = FindOptions & {
   // The directory that holds emulator_controller.proto; found in the SDK by default.
   protoDirectory?: string;
+  // How long one call may take, in milliseconds.
+  callTimeoutMs?: number;
 };
 
 export type PressOptions = {
@@ -22,6 +37,13 @@ export type PressOptions = {
   gapMs?: number;
   // How long a key is held for a plain press.
   holdMs?: number;
+  signal?: AbortSignal;
+};
+
+export type CallOptions = {
+  signal?: AbortSignal;
+  // When the call must have answered, in milliseconds since the epoch.
+  deadline?: number;
 };
 
 export type Frame = {
@@ -48,39 +70,51 @@ export type AudioPacket = {
   pcm: Buffer;
 };
 
+type Callback<T> = (error: ServiceError | null, reply: T) => void;
+
+type AudioStream = NodeJS.EventEmitter & { cancel(): void };
+
 type Controller = Client & {
   sendKey(
     request: object,
     metadata: Metadata,
-    callback: (error: ServiceError | null) => void,
-  ): void;
+    options: { deadline: number },
+    callback: Callback<unknown>,
+  ): ClientUnaryCall;
   getScreenshot(
     request: object,
     metadata: Metadata,
-    callback: (error: ServiceError | null, reply: ImageReply) => void,
-  ): void;
-  streamAudio(
-    request: object,
-    metadata: Metadata,
-  ): NodeJS.EventEmitter & { cancel(): void };
+    options: { deadline: number },
+    callback: Callback<ImageReply>,
+  ): ClientUnaryCall;
+  streamAudio(request: object, metadata: Metadata): AudioStream;
 };
 
-const sleep = (ms: number) =>
-  new Promise<void>((resolve) => setTimeout(resolve, ms));
+// The device did not answer before a call's deadline.
+export class TimeoutError extends Error {
+  constructor() {
+    super('the Vega Virtual Device did not answer in time');
+    this.name = 'TimeoutError';
+  }
+}
 
 export class Device {
   readonly emulator: Emulator;
   readonly #client: Controller;
   readonly #metadata: Metadata;
+  readonly #callTimeoutMs: number;
+  readonly #streams = new Set<AudioStream>();
 
   private constructor(
     emulator: Emulator,
     client: Controller,
     metadata: Metadata,
+    callTimeoutMs: number,
   ) {
     this.emulator = emulator;
     this.#client = client;
     this.#metadata = metadata;
+    this.#callTimeoutMs = callTimeoutMs;
   }
 
   // Connects to the newest running VVD with gRPC on, or to the given pid.
@@ -117,25 +151,66 @@ export class Device {
     const metadata = new Metadata();
     if (emulator.grpcToken)
       metadata.add('authorization', `Bearer ${emulator.grpcToken}`);
-    return new Device(emulator, client, metadata);
+    return new Device(
+      emulator,
+      client,
+      metadata,
+      options.callTimeoutMs ?? CALL_TIMEOUT_MS,
+    );
   }
 
+  // Ends the audio streams that are still open, then the connection.
   close(): void {
+    for (const stream of this.#streams) stream.cancel();
+    this.#streams.clear();
     this.#client.close();
   }
 
-  #sendKey(code: number, eventType: 'keydown' | 'keyup'): Promise<void> {
-    return new Promise((resolve, reject) =>
-      this.#client.sendKey(
-        { codeType: 'Evdev', eventType, keyCode: code },
-        this.#metadata,
-        (error) => (error ? reject(error) : resolve()),
-      ),
+  // One unary call, with a deadline, cancelled if the signal fires.
+  #call<T>(
+    start: (
+      options: { deadline: number },
+      callback: Callback<T>,
+    ) => ClientUnaryCall,
+    { signal, deadline }: CallOptions,
+  ): Promise<T> {
+    signal?.throwIfAborted();
+    return new Promise((resolve, reject) => {
+      const cancel = () => call.cancel();
+      const call = start(
+        { deadline: deadline ?? Date.now() + this.#callTimeoutMs },
+        (error, reply) => {
+          signal?.removeEventListener('abort', cancel);
+          if (signal?.aborted) reject(signal.reason);
+          else if (error?.code === status.DEADLINE_EXCEEDED)
+            reject(new TimeoutError());
+          else if (error) reject(error);
+          else resolve(reply);
+        },
+      );
+      signal?.addEventListener('abort', cancel, { once: true });
+    });
+  }
+
+  #sendKey(
+    code: number,
+    eventType: 'keydown' | 'keyup',
+    options: CallOptions = {},
+  ): Promise<unknown> {
+    return this.#call(
+      (callOptions, callback) =>
+        this.#client.sendKey(
+          { codeType: 'Evdev', eventType, keyCode: code },
+          this.#metadata,
+          callOptions,
+          callback,
+        ),
+      options,
     );
   }
 
   // Presses keys in order. Accepts names such as `ok`, `down*3`, `ok:down`,
-  // or steps already parsed.
+  // or steps already parsed. A cancelled press still releases its key.
   async press(
     keys: readonly string[] | readonly KeyStep[],
     options: PressOptions = {},
@@ -144,53 +219,93 @@ export class Device {
       typeof keys[0] === 'string'
         ? parseKeys(keys as readonly string[])
         : (keys as readonly KeyStep[]);
+    const { signal } = options;
     const gap = options.gapMs ?? 450;
     const hold = options.holdMs ?? 90;
     for (const step of steps) {
-      if (step.half !== 'up') await this.#sendKey(step.code, 'keydown');
-      if (step.half === 'press') await sleep(hold);
-      if (step.half !== 'down') await this.#sendKey(step.code, 'keyup');
-      await sleep(gap);
+      signal?.throwIfAborted();
+      if (step.half === 'press') {
+        let released = false;
+        try {
+          await this.#sendKey(step.code, 'keydown', { signal });
+          await sleep(hold, undefined, { signal });
+          await this.#sendKey(step.code, 'keyup');
+          released = true;
+        } finally {
+          if (!released)
+            await this.#sendKey(step.code, 'keyup').catch(() => {});
+        }
+      } else {
+        await this.#sendKey(
+          step.code,
+          step.half === 'down' ? 'keydown' : 'keyup',
+          { signal },
+        );
+      }
+      await sleep(gap, undefined, { signal });
     }
   }
 
   // One frame of the screen, as RGB888 or as a PNG file.
-  screenshot(format: 'png' | 'rgb' = 'png'): Promise<Frame> {
-    return new Promise((resolve, reject) =>
-      this.#client.getScreenshot(
-        { format: format === 'png' ? 'PNG' : 'RGB888' },
-        this.#metadata,
-        (error, reply) => {
-          if (error) return reject(error);
-          const data = reply.image ?? Buffer.alloc(0);
-          if (data.length === 0)
-            return reject(
-              new Error(
-                'the device returned an empty screen: is its display on?',
-              ),
-            );
-          resolve({
-            width: reply.format?.width ?? 0,
-            height: reply.format?.height ?? 0,
-            data,
-            timestampUs: Number(reply.timestampUs ?? 0),
-          });
-        },
-      ),
+  async screenshot(
+    format: 'png' | 'rgb' = 'png',
+    options: CallOptions = {},
+  ): Promise<Frame> {
+    const reply = await this.#call<ImageReply>(
+      (callOptions, callback) =>
+        this.#client.getScreenshot(
+          { format: format === 'png' ? 'PNG' : 'RGB888' },
+          this.#metadata,
+          callOptions,
+          callback,
+        ),
+      options,
     );
+    const data = reply.image ?? Buffer.alloc(0);
+    if (data.length === 0)
+      throw new Error(
+        'the device returned an empty screen: is its display on?',
+      );
+    return {
+      width: reply.format?.width ?? 0,
+      height: reply.format?.height ?? 0,
+      data,
+      timestampUs: Number(reply.timestampUs ?? 0),
+    };
+  }
+
+  // A screenshot taken while polling until `endMs`: its deadline stays close
+  // to the end, and one that runs out after the end gives undefined.
+  async #poll(endMs: number, signal?: AbortSignal): Promise<Frame | undefined> {
+    try {
+      return await this.screenshot('rgb', {
+        signal,
+        deadline: Math.min(Date.now() + this.#callTimeoutMs, endMs + 1000),
+      });
+    } catch (error) {
+      if (error instanceof TimeoutError && Date.now() >= endMs)
+        return undefined;
+      throw error;
+    }
   }
 
   // Waits until the screen differs from how it looked when the wait began.
   // Polls screenshots: the emulator's own screenshot stream can stop
   // delivering frames while the screen keeps changing.
   async waitForChange(
-    options: { timeoutMs?: number; intervalMs?: number } = {},
+    options: {
+      timeoutMs?: number;
+      intervalMs?: number;
+      signal?: AbortSignal;
+    } = {},
   ): Promise<boolean> {
-    const deadline = Date.now() + (options.timeoutMs ?? 5000);
-    const first = await this.screenshot('rgb');
-    while (Date.now() < deadline) {
-      await sleep(options.intervalMs ?? 50);
-      const frame = await this.screenshot('rgb');
+    const { signal } = options;
+    const endMs = Date.now() + (options.timeoutMs ?? 5000);
+    const first = await this.screenshot('rgb', { signal });
+    while (Date.now() < endMs) {
+      await sleep(options.intervalMs ?? 50, undefined, { signal });
+      const frame = await this.#poll(endMs, signal);
+      if (!frame) return false;
       if (!frame.data.equals(first.data)) return true;
     }
     return false;
@@ -201,28 +316,31 @@ export class Device {
   async frames(
     durationMs: number,
     onFrame: (frame: Frame) => void | Promise<void>,
-    options: { intervalMs?: number } = {},
+    options: { intervalMs?: number; signal?: AbortSignal } = {},
   ): Promise<number> {
-    const deadline = Date.now() + durationMs;
+    const { signal } = options;
+    const endMs = Date.now() + durationMs;
     let previous: Buffer | undefined;
     let count = 0;
-    while (Date.now() < deadline) {
-      const frame = await this.screenshot('rgb');
+    while (Date.now() < endMs) {
+      const frame = await this.#poll(endMs, signal);
+      if (!frame) break;
       if (!previous || !frame.data.equals(previous)) {
         previous = frame.data;
         count += 1;
         await onFrame(frame);
       }
-      if (options.intervalMs) await sleep(options.intervalMs);
+      if (options.intervalMs)
+        await sleep(options.intervalMs, undefined, { signal });
     }
     return count;
   }
 
   // The device's audio as 16-bit little-endian stereo PCM at 44.1 kHz.
   // Returns a function that stops the stream and gives back the packets that
-  // arrived, each with the time it was captured. The emulator sends nothing
-  // while the device is silent, so the packets can have gaps; see
-  // assembleAudio in record.ts.
+  // arrived, each with the time it was captured; calling it again gives the
+  // same packets. The emulator sends nothing while the device is silent, so
+  // the packets can have gaps; see assembleAudio in record.ts.
   listen(): () => AudioPacket[] {
     const packets: AudioPacket[] = [];
     const stream = this.#client.streamAudio(
@@ -234,6 +352,7 @@ export class Device {
       },
       this.#metadata,
     );
+    this.#streams.add(stream);
     stream.on('data', (packet: AudioReply) => {
       if (packet.audio?.length)
         packets.push({
@@ -245,7 +364,7 @@ export class Device {
       // Cancelling the stream ends it with an error; nothing to report.
     });
     return () => {
-      stream.cancel();
+      if (this.#streams.delete(stream)) stream.cancel();
       return packets;
     };
   }

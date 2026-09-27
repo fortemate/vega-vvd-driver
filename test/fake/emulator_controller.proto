@@ -1,0 +1,72 @@
+// A stand-in for the Android emulator's EmulatorController API, for tests:
+// only the calls and fields the driver uses, under the same names and field
+// numbers. The real definition (AOSP, Apache-2.0) ships with the Vega SDK and
+// is loaded from there at run time; no file of the SDK is copied here.
+syntax = "proto3";
+
+package android.emulation.control;
+
+message Empty {}
+
+message KeyboardEvent {
+  enum KeyCodeType {
+    Usb = 0;
+    Evdev = 1;
+  }
+  enum KeyEventType {
+    keydown = 0;
+    keyup = 1;
+    keypress = 2;
+  }
+  KeyCodeType codeType = 1;
+  KeyEventType eventType = 2;
+  int32 keyCode = 3;
+}
+
+message ImageFormat {
+  enum ImgFormat {
+    PNG = 0;
+    RGBA8888 = 1;
+    RGB888 = 2;
+  }
+  ImgFormat format = 1;
+  uint32 width = 3;
+  uint32 height = 4;
+}
+
+message Image {
+  ImageFormat format = 1;
+  bytes image = 4;
+  uint64 timestampUs = 6;
+}
+
+message AudioFormat {
+  enum SampleFormat {
+    AUD_FMT_U8 = 0;
+    AUD_FMT_S16 = 1;
+  }
+  enum Channels {
+    Mono = 0;
+    Stereo = 1;
+  }
+  enum DeliveryMode {
+    MODE_UNSPECIFIED = 0;
+    MODE_REAL_TIME = 1;
+  }
+  uint64 samplingRate = 1;
+  Channels channels = 2;
+  SampleFormat format = 3;
+  DeliveryMode mode = 4;
+}
+
+message AudioPacket {
+  AudioFormat format = 1;
+  uint64 timestamp = 2;
+  bytes audio = 3;
+}
+
+service EmulatorController {
+  rpc sendKey(KeyboardEvent) returns (Empty) {}
+  rpc getScreenshot(ImageFormat) returns (Image) {}
+  rpc streamAudio(AudioFormat) returns (stream AudioPacket) {}
+}

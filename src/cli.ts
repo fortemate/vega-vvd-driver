@@ -20,7 +20,7 @@ Commands:
   devices                    list running devices whose gRPC endpoint is on
   enable-grpc                turn gRPC on (it is off after every start of the device)
       --port <n>             gRPC port, default 8554
-      --console-port <n>     emulator console port, default 5554
+      --console-port <n>     emulator console port, even, 5554 to 5682; default 5554
   press <key...>             press remote keys in order
                              up down left right ok back menu playpause rewind
                              fastforward, a KEY_* name or an evdev code;
@@ -33,7 +33,7 @@ Commands:
       --no-audio             video only
   frames <dir>               save every distinct frame as a PNG, to check animations
       --seconds <n>          default 3
-  wait-change                exit 0 once the screen changes, 1 on timeout
+  wait-change                exit 0 once the screen changes, 1 on a timeout
       --timeout <ms>         default 5000
   safe-area                  check the outer 5% of the screen against the background;
                              exit 0 when clear, 1 when something sits in the margin
@@ -41,9 +41,13 @@ Commands:
       --margin <fraction>    default 0.05
   mcp                        run the MCP server on stdio, for AI agents
 
-Options for every command:
+Options:
   --pid <n>                  the device to drive when several run
+                             (every command but enable-grpc, which uses
+                             --console-port)
   -h, --help, -v, --version
+
+Exit status: 0 on success, 1 for "no change" and "not clear", 2 on an error.
 `;
 
 export type Parsed = {
@@ -144,15 +148,19 @@ export const main = async (argv: readonly string[]): Promise<number> => {
       return 0;
     }
     case 'enable-grpc': {
+      if (pid !== undefined)
+        throw new Error(
+          'enable-grpc talks to an emulator console, not to a pid: use --console-port',
+        );
       const port = numberOption(values.port, 'port', 8554, {
-        min: 1,
+        min: 1024,
         max: 65535,
       });
       const consolePort = numberOption(
         values['console-port'],
         'console-port',
         5554,
-        { min: 1, max: 65535 },
+        { min: 5554, max: 5682 },
       );
       await enableGrpc(port, { port: consolePort });
       console.log(`gRPC is on at port ${port}.`);
@@ -281,7 +289,7 @@ export const main = async (argv: readonly string[]): Promise<number> => {
       }
     }
     case 'mcp':
-      await serveStdio();
+      await serveStdio({ pid });
       return -1; // keeps running until the client disconnects
     default:
       throw new Error(`unknown command "${command}". Run vvd --help.`);

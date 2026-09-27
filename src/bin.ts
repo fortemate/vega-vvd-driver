@@ -9,7 +9,8 @@ main(process.argv.slice(2)).then(
     if (code >= 0) process.exitCode = code;
   },
   (error: unknown) => {
+    // 2, so that scripts can tell an error from wait-change's "no change".
     console.error(`vvd: ${(error as Error).message ?? String(error)}`);
-    process.exitCode = 1;
+    process.exitCode = 2;
   },
 );

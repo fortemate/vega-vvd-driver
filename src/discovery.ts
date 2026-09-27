@@ -3,7 +3,7 @@
 // in a discovery file, `pid_<pid>.ini`, in a per-user directory. The file holds
 // the gRPC port and an access token; the token is read here and never printed.
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 
 export type Emulator = {
@@ -11,23 +11,57 @@ export type Emulator = {
   // The discovery file it was found in.
   file: string;
   grpcPort: number;
-  // A bearer token for the gRPC endpoint. Keep it out of logs.
-  grpcToken: string | undefined;
+  // A bearer token for the gRPC endpoint. It is not enumerable, so it stays
+  // out of JSON.stringify, util.inspect and object spreads; keep it out of
+  // logs too.
+  readonly grpcToken: string | undefined;
   // The emulator console, where `grpc <port>` turns the endpoint on.
   consolePort: number | undefined;
   avdName: string | undefined;
 };
 
-// Where a running emulator leaves its discovery file: macOS, then Linux.
+const userName = (): string | undefined => {
+  try {
+    return userInfo().username;
+  } catch {
+    return undefined; // no entry in the user database
+  }
+};
+
+export type SystemFacts = {
+  uid: number | undefined;
+  user: string | undefined;
+  tmp: string;
+};
+
+const systemFacts = (): SystemFacts => ({
+  uid: process.getuid?.(),
+  user: userName(),
+  tmp: tmpdir(),
+});
+
+// Where a running emulator leaves its discovery file. The macOS location was
+// measured with the VVD. The Linux ones are untested with a VVD: the runtime
+// directory, then the Android emulator's fallbacks.
 export const runningDirectories = (
   env: NodeJS.ProcessEnv = process.env,
   home: string = homedir(),
-): string[] =>
-  [
-    join(home, 'Library/Caches/TemporaryItems/avd/running'),
-    env.XDG_RUNTIME_DIR ? join(env.XDG_RUNTIME_DIR, 'avd/running') : '',
-    join(home, '.android/avd/running'),
-  ].filter(Boolean);
+  system: SystemFacts = systemFacts(),
+): string[] => {
+  const { uid, user, tmp } = system;
+  return [
+    ...new Set(
+      [
+        join(home, 'Library/Caches/TemporaryItems/avd/running'),
+        env.XDG_RUNTIME_DIR ? join(env.XDG_RUNTIME_DIR, 'avd/running') : '',
+        uid === undefined ? '' : `/run/user/${uid}/avd/running`,
+        user ? `/tmp/android-${user}/avd/running` : '',
+        user ? join(tmp, `android-${user}`, 'avd/running') : '',
+        join(home, '.android/avd/running'),
+      ].filter(Boolean),
+    ),
+  ];
+};
 
 // A discovery file is `key=value` lines.
 export const parseDiscovery = (text: string): Map<string, string> => {
@@ -79,17 +113,18 @@ export const findEmulators = (options: FindOptions = {}): Emulator[] => {
       const fields = parseDiscovery(readFileSync(file, 'utf8'));
       const grpcPort = toPort(fields.get('grpc.port'));
       if (grpcPort === undefined) continue;
-      found.push({
-        emulator: {
+      const emulator = Object.defineProperty(
+        {
           pid,
           file,
           grpcPort,
-          grpcToken: fields.get('grpc.token') || undefined,
           consolePort: toPort(fields.get('port.serial')),
           avdName: fields.get('avd.name') || undefined,
         },
-        modified: statSync(file).mtimeMs,
-      });
+        'grpcToken',
+        { value: fields.get('grpc.token') || undefined, enumerable: false },
+      ) as Emulator;
+      found.push({ emulator, modified: statSync(file).mtimeMs });
     }
   }
   return found
@@ -118,42 +153,64 @@ export const findEmulator = (options: FindOptions = {}): Emulator => {
 // ships inside the Vega SDK (it is AOSP code under Apache-2.0). It is loaded
 // from the developer's own SDK rather than copied here. VVD_PROTO_DIR
 // overrides the search.
+const inVersion = (versionDir: string) =>
+  join(versionDir, 'vvd/images/tv/vmtools/agent/lib');
+
+const hasProto = (dir: string) =>
+  existsSync(join(dir, 'emulator_controller.proto'));
+
+// The SDK's own record of where it lives and which version is the default.
+const configuredVersion = (home: string): string | undefined => {
+  try {
+    const config = JSON.parse(
+      readFileSync(join(home, 'vega/config.json'), 'utf8'),
+    ) as { sdkPath?: string; defaultVersion?: string };
+    const [channel, version] = (config.defaultVersion ?? '').split('@');
+    return config.sdkPath && channel && version
+      ? join(config.sdkPath, 'vega-sdk', channel, version)
+      : undefined;
+  } catch {
+    return undefined; // no config, or an unreadable one: scan instead
+  }
+};
+
+// Directories only: a stray file, such as Finder's .DS_Store, is skipped.
+const subdirectories = (dir: string): string[] => {
+  try {
+    return readdirSync(dir, { withFileTypes: true })
+      .filter(
+        (entry) =>
+          entry.isDirectory() ||
+          (entry.isSymbolicLink() &&
+            statSync(join(dir, entry.name), {
+              throwIfNoEntry: false,
+            })?.isDirectory() === true),
+      )
+      .map((entry) => entry.name);
+  } catch {
+    return [];
+  }
+};
+
+// Every installed version, newest first by number: 0.24 comes before 0.9.
+const installedVersions = (sdkRoot: string): string[] =>
+  subdirectories(sdkRoot).flatMap((channel) =>
+    subdirectories(join(sdkRoot, channel))
+      .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }))
+      .map((version) => join(sdkRoot, channel, version)),
+  );
+
 export const findProtoDirectory = (
   env: NodeJS.ProcessEnv = process.env,
   home: string = homedir(),
 ): string => {
   if (env.VVD_PROTO_DIR) return env.VVD_PROTO_DIR;
-  const inVersion = (versionDir: string) =>
-    join(versionDir, 'vvd/images/tv/vmtools/agent/lib');
-  const candidates: string[] = [];
-  // The SDK's own record of where it lives and which version is the default.
-  const configFile = join(home, 'vega/config.json');
-  if (existsSync(configFile)) {
-    try {
-      const config = JSON.parse(readFileSync(configFile, 'utf8')) as {
-        sdkPath?: string;
-        defaultVersion?: string;
-      };
-      const [channel, version] = (config.defaultVersion ?? '').split('@');
-      if (config.sdkPath && channel && version)
-        candidates.push(
-          inVersion(join(config.sdkPath, 'vega-sdk', channel, version)),
-        );
-    } catch {
-      // An unreadable config falls back to scanning.
-    }
-  }
-  // Otherwise every installed version, newest first.
-  const sdkRoot = join(home, 'vega/sdk/vega-sdk');
-  if (existsSync(sdkRoot))
-    for (const channel of readdirSync(sdkRoot))
-      for (const version of readdirSync(join(sdkRoot, channel))
-        .sort()
-        .reverse())
-        candidates.push(inVersion(join(sdkRoot, channel, version)));
-  const found = candidates.find((dir) =>
-    existsSync(join(dir, 'emulator_controller.proto')),
-  );
+  const configured = configuredVersion(home);
+  if (configured && hasProto(inVersion(configured)))
+    return inVersion(configured);
+  const found = installedVersions(join(home, 'vega/sdk/vega-sdk'))
+    .map(inVersion)
+    .find(hasProto);
   if (!found)
     throw new Error(
       'emulator_controller.proto not found in the Vega SDK. Install the SDK, or set VVD_PROTO_DIR ' +

@@ -14,6 +14,11 @@ updates:
       include: 'scope'
     assignees:
       - 'rabestro'
+    ignore:
+      # TypeScript majors are taken by hand, as in the organization's other
+      # repositories: 7 is a new, native compiler.
+      - dependency-name: 'typescript'
+        update-types: ['version-update:semver-major']
     groups:
       # Types, the compiler and the formatter move together.
       tooling:

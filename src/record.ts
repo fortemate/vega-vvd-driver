@@ -1,4 +1,4 @@
-// Recording the VVD's screen, with its sound, to an MP4 file. Needs ffmpeg on
+// Recording the VVD's screen, with its sound, to a video file. Needs ffmpeg on
 // the PATH.
 //
 // Frames are polled with getScreenshot and written to ffmpeg at a fixed frame
@@ -8,45 +8,94 @@
 // 1080p. The audio comes from streamAudio. The emulator sends nothing while
 // the device is silent, so the track is rebuilt on the video's clock from each
 // packet's capture time, with silence in the gaps.
-import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+//
+// However a recording ends, it cleans up after itself: ffmpeg is stopped, the
+// audio stream is cancelled and the working directory is removed.
+import { spawn, type ChildProcessByStdio } from 'node:child_process';
+import { once } from 'node:events';
+import {
+  accessSync,
+  constants,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import type { AudioPacket, Device } from './device.ts';
+import { dirname, join, resolve } from 'node:path';
+import type { Readable, Writable } from 'node:stream';
+import { setTimeout as sleep } from 'node:timers/promises';
+import { CALL_TIMEOUT_MS, type AudioPacket, type Device } from './device.ts';
 
 export type RecordOptions = {
-  // Where the MP4 goes.
+  // Where the video goes. ffmpeg picks the container from the extension.
   file: string;
   seconds: number;
   fps?: number;
   audio?: boolean;
-  // Called once recording has begun, for example to start pressing keys.
+  // Runs once the first frame is in, alongside the recording: for example, to
+  // press keys. The recording resolves when both have finished.
   onStart?: () => void | Promise<void>;
+  // Stops the recording early; it then rejects with the signal's reason.
+  signal?: AbortSignal;
 };
 
 export type RecordResult = {
+  // The video's absolute path.
   file: string;
   frames: number;
   screenshots: number;
+  // How much of the recording the device's audio covered.
   audioSeconds: number;
 };
 
-const run = (command: string, args: readonly string[]) =>
-  new Promise<void>((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+type Process = ChildProcessByStdio<Writable | null, null, Readable>;
+
+// Settles when the process has ended: resolves on exit code 0, and otherwise
+// rejects with the end of what it wrote to stderr.
+const ended = (child: Process, name: string): Promise<void> =>
+  new Promise((resolve, reject) => {
     let stderr = '';
     child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
     child.on('error', reject);
-    child.on('close', (code) =>
+    child.on('close', (code, signal) =>
       code === 0
         ? resolve()
         : reject(
             new Error(
-              `${command} exited with ${code}: ${stderr.trim().slice(-500)}`,
+              `${name} exited with ${code ?? signal}: ${stderr.trim().slice(-500)}`,
             ),
           ),
     );
   });
+
+const run = (command: string, args: readonly string[], signal?: AbortSignal) =>
+  ended(
+    spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe'], signal }),
+    command,
+  );
+
+// Waits for a promise, or rejects as soon as the signal fires.
+const abortable = <T>(
+  promise: Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> => {
+  if (!signal) return promise;
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+};
 
 const SAMPLE_RATE = 44100;
 const FRAME_BYTES = 4; // 16-bit stereo
@@ -82,16 +131,50 @@ export const assembleAudio = (
   return track;
 };
 
+// How many seconds of the window from `startUs` the packets cover.
+export const audioWithin = (
+  packets: readonly AudioPacket[],
+  startUs: number,
+  seconds: number,
+): number => {
+  const endUs = startUs + seconds * 1e6;
+  let covered = 0;
+  for (const packet of packets) {
+    const lengthUs =
+      (Math.floor(packet.pcm.length / FRAME_BYTES) / SAMPLE_RATE) * 1e6;
+    const from = Math.max(packet.timestampUs, startUs);
+    const to = Math.min(packet.timestampUs + lengthUs, endUs);
+    if (to > from) covered += to - from;
+  }
+  return covered / 1e6;
+};
+
 export const hasFfmpeg = (): Promise<boolean> =>
   run('ffmpeg', ['-version']).then(
     () => true,
     () => false,
   );
 
+// The output as an absolute path, in a directory that can be written: checked
+// before anything is recorded, not after.
+const outputPath = (file: string): string => {
+  const path = resolve(file);
+  try {
+    accessSync(dirname(path), constants.W_OK);
+  } catch {
+    throw new Error(`cannot write to ${dirname(path)}`);
+  }
+  return path;
+};
+
 export const record = async (
   device: Device,
   options: RecordOptions,
 ): Promise<RecordResult> => {
+  const { signal } = options;
+  const output = outputPath(options.file);
+  // "file:" keeps ffmpeg from reading a name such as "http://…" as a URL.
+  const target = `file:${output}`;
   if (!(await hasFfmpeg()))
     throw new Error(
       'recording needs ffmpeg on the PATH (for example: brew install ffmpeg)',
@@ -99,15 +182,26 @@ export const record = async (
   const fps = options.fps ?? 30;
   const withAudio = options.audio ?? true;
   const work = mkdtempSync(join(tmpdir(), 'vvd-record-'));
+  let encoder: ChildProcessByStdio<Writable, null, Readable> | undefined;
+  let encoded: Promise<void> | undefined;
+  let stopAudio: (() => AudioPacket[]) | undefined;
   try {
-    const first = await device.screenshot('rgb');
-    const size = `${first.width}x${first.height}`;
+    const first = await device.screenshot('rgb', { signal });
     const video = join(work, 'video.mp4');
-    const encoder = spawn(
+    encoder = spawn(
       'ffmpeg',
       [
         ['-loglevel', 'error', '-y'],
-        ['-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', size, '-r', String(fps)],
+        [
+          '-f',
+          'rawvideo',
+          '-pix_fmt',
+          'rgb24',
+          '-s',
+          `${first.width}x${first.height}`,
+          '-r',
+          String(fps),
+        ],
         ['-i', 'pipe:0'],
         [
           '-c:v',
@@ -123,75 +217,88 @@ export const record = async (
       ].flat(),
       { stdio: ['pipe', 'ignore', 'pipe'] },
     );
-    let encoderError = '';
-    encoder.stderr.on(
-      'data',
-      (chunk: Buffer) => (encoderError += chunk.toString()),
-    );
-    const encoded = new Promise<void>((resolve, reject) => {
-      encoder.on('error', reject);
-      encoder.on('close', (code) =>
-        code === 0
-          ? resolve()
-          : reject(
-              new Error(
-                `ffmpeg exited with ${code}: ${encoderError.trim().slice(-500)}`,
-              ),
-            ),
-      );
+    const stdin = encoder.stdin;
+    encoded = ended(encoder, 'ffmpeg');
+    // Awaited below. Until then, an early exit must not crash the process.
+    encoded.catch(() => {});
+    // A broken pipe means ffmpeg has gone, and `encoded` says why.
+    stdin.on('error', () => {});
+    let finishing = false;
+    // Rejects when ffmpeg stops before it has been asked to.
+    const died = encoded.then(() => {
+      if (!finishing)
+        throw new Error('ffmpeg stopped before the recording ended');
     });
+    died.catch(() => {});
+    const write = async (chunk: Buffer) => {
+      if (stdin.write(chunk)) return;
+      try {
+        await Promise.race([once(stdin, 'drain', { signal }), died]);
+      } catch (error) {
+        // A broken pipe: ffmpeg's own exit, if it comes soon, says more.
+        if (!signal?.aborted) await Promise.race([died, sleep(1000)]);
+        throw error;
+      }
+    };
 
-    const stopAudio = withAudio ? device.listen() : undefined;
+    stopAudio = withAudio ? device.listen() : undefined;
     const startMs = Date.now();
     const endMs = startMs + options.seconds * 1000;
     let latest = first.data;
-    let written = 0;
+    let written = 1;
     let screenshots = 1;
-    // Writes the latest frame until the video has caught up with the clock,
-    // waiting for ffmpeg to drain when its input is full.
+    await write(latest);
+    // Writes the latest frame until the video has caught up with the clock.
     const catchUp = async (untilMs: number) => {
       const due = Math.floor(((untilMs - startMs) / 1000) * fps);
       while (written < due) {
         written += 1;
-        if (!encoder.stdin.write(latest))
-          await new Promise<void>((resolve) =>
-            encoder.stdin.once('drain', resolve),
-          );
+        await write(latest);
       }
     };
-    await options.onStart?.();
+    // The caller's actions run alongside the recording, not before it.
+    let startFailure: { error: unknown } | undefined;
+    const started = (async () => options.onStart?.())();
+    started.catch((error: unknown) => (startFailure = { error }));
     while (Date.now() < endMs) {
-      const frame = await device.screenshot('rgb');
+      signal?.throwIfAborted();
+      if (startFailure) throw startFailure.error;
+      const frame = await device
+        .screenshot('rgb', {
+          signal,
+          deadline: Math.min(Date.now() + CALL_TIMEOUT_MS, endMs + 1000),
+        })
+        .catch((error: unknown) => {
+          // A screenshot that runs out of time after the end ends the loop.
+          if ((error as Error).name === 'TimeoutError' && Date.now() >= endMs)
+            return undefined;
+          throw error;
+        });
+      if (!frame) break;
       screenshots += 1;
       if (frame.width === first.width && frame.height === first.height)
         latest = frame.data;
       await catchUp(Math.min(Date.now(), endMs));
     }
     await catchUp(endMs);
-    encoder.stdin.end();
-    await encoded;
+    const packets = stopAudio?.() ?? [];
+    stopAudio = undefined;
+    finishing = true;
+    stdin.end();
+    await abortable(encoded, signal);
+    await abortable(started, signal);
 
-    if (!stopAudio) {
-      await run('ffmpeg', [
-        '-loglevel',
-        'error',
-        '-y',
-        '-i',
-        video,
-        '-c',
-        'copy',
-        '-movflags',
-        '+faststart',
-        options.file,
-      ]);
-      return {
-        file: options.file,
-        frames: written,
-        screenshots,
-        audioSeconds: 0,
-      };
+    if (!withAudio) {
+      await run(
+        'ffmpeg',
+        [
+          ['-loglevel', 'error', '-y', '-i', video],
+          ['-c', 'copy', '-movflags', '+faststart', target],
+        ].flat(),
+        signal,
+      );
+      return { file: output, frames: written, screenshots, audioSeconds: 0 };
     }
-    const packets = stopAudio();
     const raw = join(work, 'audio.raw');
     writeFileSync(raw, assembleAudio(packets, startMs * 1000, options.seconds));
     await run(
@@ -211,17 +318,23 @@ export const record = async (
           '-movflags',
           '+faststart',
         ],
-        [options.file],
+        [target],
       ].flat(),
+      signal,
     );
-    const heard = packets.reduce((sum, packet) => sum + packet.pcm.length, 0);
     return {
-      file: options.file,
+      file: output,
       frames: written,
       screenshots,
-      audioSeconds: heard / FRAME_BYTES / SAMPLE_RATE,
+      audioSeconds: audioWithin(packets, startMs * 1000, options.seconds),
     };
   } finally {
+    stopAudio?.();
+    if (encoder && encoder.exitCode === null && encoder.signalCode === null) {
+      encoder.stdin.destroy();
+      encoder.kill('SIGKILL');
+    }
+    await encoded?.catch(() => {});
     rmSync(work, { recursive: true, force: true });
   }
 };
