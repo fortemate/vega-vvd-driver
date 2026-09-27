@@ -1,0 +1,60 @@
+{
+  "name": "@fortemate/vega-vvd-driver",
+  "version": "0.1.0",
+  "description": "Unofficial driver for the Vega Virtual Device: remote keys, screenshots and video with sound, from scripts and AI agents. CLI, Node library and MCP server.",
+  "keywords": [
+    "vega",
+    "fire-tv",
+    "vega-virtual-device",
+    "emulator",
+    "automation",
+    "testing",
+    "screenshot",
+    "mcp"
+  ],
+  "homepage": "https://github.com/fortemate/vega-vvd-driver#readme",
+  "bugs": "https://github.com/fortemate/vega-vvd-driver/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fortemate/vega-vvd-driver.git"
+  },
+  "license": "MIT",
+  "author": "Jegors Čemisovs",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "vvd": "dist/bin.js"
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.test.*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "check": "tsc -p tsconfig.json",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "node --test test/*.test.ts",
+    "test:device": "VVD_INTEGRATION=1 node --test test/device.test.ts",
+    "prepare": "npm run build"
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "^1.14.5",
+    "@grpc/proto-loader": "^0.8.1",
+    "@modelcontextprotocol/sdk": "^1.30.1",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "prettier": "^3.9.9",
+    "typescript": "~6.0.3"
+  }
+}

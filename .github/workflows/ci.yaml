@@ -1,0 +1,28 @@
+name: Checks
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+
+# `vars.RUNS_ON` resolves to the organization's default, a GitHub-hosted image.
+# This repository is meant to be public, so it must never be pointed at the
+# organization's self-hosted runner. Dependabot always gets a hosted runner.
+#
+# CI has no Vega Virtual Device, so test/device.test.ts skips itself here; run
+# it locally with `npm run test:device`.
+jobs:
+  checks:
+    runs-on: ${{ fromJSON(github.actor == 'dependabot[bot]' && '["ubuntu-24.04"]' || vars.RUNS_ON || '["ubuntu-24.04"]') }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v4
+      - run: npm ci
+      - run: npm run check
+      - run: npm run format:check
+      - run: npm test
+      - run: npm run build
+      # The package that npm would publish: the CLI must start from it.
+      - run: node dist/bin.js --version

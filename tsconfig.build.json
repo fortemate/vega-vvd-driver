@@ -1,0 +1,14 @@
+{
+  // The published build: JavaScript and declarations in dist/, with the .ts
+  // extensions of relative imports rewritten to .js.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "allowImportingTsExtensions": false,
+    "rewriteRelativeImportExtensions": true,
+    "declaration": true,
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  "include": ["src/**/*.ts"]
+}

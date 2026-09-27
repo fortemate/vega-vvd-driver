@@ -1,0 +1,36 @@
+[tools]
+# --- Runtime ---
+node = "26.8.2" # the version CI uses; the tests run TypeScript directly in it
+
+# --- Git hooks (lefthook.yml) ---
+lefthook = "2.1.14" # Git hooks manager (pre-commit / pre-push)
+betterleaks = "1.8.1" # secret scanning in the pre-commit hook
+actionlint = "1.7.12" # workflow linting in the pre-commit hook
+
+# The Vega SDK is not a mise tool: Amazon licenses it to each developer, who
+# installs it with Amazon's installer. The device tasks need its `vega` CLI.
+
+[tasks.setup]
+description = "📦 Install the dependencies and register the Git hooks"
+run = ["npm ci", "lefthook install"]
+
+[tasks.check]
+description = "✅ Run every check CI runs: types, format, tests and the build"
+run = [
+  "npm run check",
+  "npm run format:check",
+  "npm test",
+  "npm run build",
+]
+
+[tasks."device:start"]
+description = "📺 Start the Vega Virtual Device without a window, and turn gRPC on"
+run = ["vega virtual-device start --no-gui", "node src/bin.ts enable-grpc"]
+
+[tasks."device:stop"]
+description = "⏹️  Stop the Vega Virtual Device"
+run = "vega virtual-device stop"
+
+[tasks."test:device"]
+description = "🧪 Run the integration tests against the running device"
+run = "npm run test:device"

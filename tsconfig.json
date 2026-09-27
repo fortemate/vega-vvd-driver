@@ -1,0 +1,19 @@
+{
+  // Type checking for the sources and the tests. The tests run as TypeScript
+  // straight in Node (type stripping), so everything here must be erasable
+  // syntax, and relative imports carry their .ts extension.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "strict": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

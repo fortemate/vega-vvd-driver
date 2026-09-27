@@ -1,0 +1,167 @@
+// Finding a running Vega Virtual Device. The VVD is built on the Android
+// emulator, and a running emulator whose gRPC endpoint is on advertises itself
+// in a discovery file, `pid_<pid>.ini`, in a per-user directory. The file holds
+// the gRPC port and an access token; the token is read here and never printed.
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
+export type Emulator = {
+  pid: number;
+  // The discovery file it was found in.
+  file: string;
+  grpcPort: number;
+  // A bearer token for the gRPC endpoint. Keep it out of logs.
+  grpcToken: string | undefined;
+  // The emulator console, where `grpc <port>` turns the endpoint on.
+  consolePort: number | undefined;
+  avdName: string | undefined;
+};
+
+// Where a running emulator leaves its discovery file: macOS, then Linux.
+export const runningDirectories = (
+  env: NodeJS.ProcessEnv = process.env,
+  home: string = homedir(),
+): string[] =>
+  [
+    join(home, 'Library/Caches/TemporaryItems/avd/running'),
+    env.XDG_RUNTIME_DIR ? join(env.XDG_RUNTIME_DIR, 'avd/running') : '',
+    join(home, '.android/avd/running'),
+  ].filter(Boolean);
+
+// A discovery file is `key=value` lines.
+export const parseDiscovery = (text: string): Map<string, string> => {
+  const fields = new Map<string, string>();
+  for (const line of text.split(/\r?\n/)) {
+    const at = line.indexOf('=');
+    if (at > 0) fields.set(line.slice(0, at).trim(), line.slice(at + 1).trim());
+  }
+  return fields;
+};
+
+const isAlive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM: the process exists but belongs to someone else.
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+};
+
+const toPort = (value: string | undefined): number | undefined => {
+  const port = Number(value);
+  return Number.isInteger(port) && port > 0 ? port : undefined;
+};
+
+export type FindOptions = {
+  directories?: string[];
+  // Keep only this emulator.
+  pid?: number;
+  // Decides whether a process is still running; replaceable in tests.
+  alive?: (pid: number) => boolean;
+};
+
+// The running emulators with gRPC on, newest first. Stale files left by an
+// emulator that has exited are skipped.
+export const findEmulators = (options: FindOptions = {}): Emulator[] => {
+  const alive = options.alive ?? isAlive;
+  const found: { emulator: Emulator; modified: number }[] = [];
+  for (const directory of options.directories ?? runningDirectories()) {
+    if (!existsSync(directory)) continue;
+    for (const name of readdirSync(directory)) {
+      const match = /^pid_(\d+)\.ini$/.exec(name);
+      if (!match) continue;
+      const pid = Number(match[1]);
+      if (options.pid !== undefined && pid !== options.pid) continue;
+      if (!alive(pid)) continue;
+      const file = join(directory, name);
+      const fields = parseDiscovery(readFileSync(file, 'utf8'));
+      const grpcPort = toPort(fields.get('grpc.port'));
+      if (grpcPort === undefined) continue;
+      found.push({
+        emulator: {
+          pid,
+          file,
+          grpcPort,
+          grpcToken: fields.get('grpc.token') || undefined,
+          consolePort: toPort(fields.get('port.serial')),
+          avdName: fields.get('avd.name') || undefined,
+        },
+        modified: statSync(file).mtimeMs,
+      });
+    }
+  }
+  return found
+    .sort((a, b) => b.modified - a.modified)
+    .map(({ emulator }) => emulator);
+};
+
+export class NoDeviceError extends Error {
+  constructor() {
+    super(
+      'No running Vega Virtual Device with gRPC found. Start it (vega virtual-device start), ' +
+        'then turn gRPC on with `vvd enable-grpc`: it is off after every start of the device.',
+    );
+    this.name = 'NoDeviceError';
+  }
+}
+
+// The one emulator to drive: the given pid, or the newest.
+export const findEmulator = (options: FindOptions = {}): Emulator => {
+  const [emulator] = findEmulators(options);
+  if (!emulator) throw new NoDeviceError();
+  return emulator;
+};
+
+// The emulator's gRPC API is described by emulator_controller.proto, which
+// ships inside the Vega SDK (it is AOSP code under Apache-2.0). It is loaded
+// from the developer's own SDK rather than copied here. VVD_PROTO_DIR
+// overrides the search.
+export const findProtoDirectory = (
+  env: NodeJS.ProcessEnv = process.env,
+  home: string = homedir(),
+): string => {
+  if (env.VVD_PROTO_DIR) return env.VVD_PROTO_DIR;
+  const inVersion = (versionDir: string) =>
+    join(versionDir, 'vvd/images/tv/vmtools/agent/lib');
+  const candidates: string[] = [];
+  // The SDK's own record of where it lives and which version is the default.
+  const configFile = join(home, 'vega/config.json');
+  if (existsSync(configFile)) {
+    try {
+      const config = JSON.parse(readFileSync(configFile, 'utf8')) as {
+        sdkPath?: string;
+        defaultVersion?: string;
+      };
+      const [channel, version] = (config.defaultVersion ?? '').split('@');
+      if (config.sdkPath && channel && version)
+        candidates.push(
+          inVersion(join(config.sdkPath, 'vega-sdk', channel, version)),
+        );
+    } catch {
+      // An unreadable config falls back to scanning.
+    }
+  }
+  // Otherwise every installed version, newest first.
+  const sdkRoot = join(home, 'vega/sdk/vega-sdk');
+  if (existsSync(sdkRoot))
+    for (const channel of readdirSync(sdkRoot))
+      for (const version of readdirSync(join(sdkRoot, channel))
+        .sort()
+        .reverse())
+        candidates.push(inVersion(join(sdkRoot, channel, version)));
+  const found = candidates.find((dir) =>
+    existsSync(join(dir, 'emulator_controller.proto')),
+  );
+  if (!found)
+    throw new Error(
+      'emulator_controller.proto not found in the Vega SDK. Install the SDK, or set VVD_PROTO_DIR ' +
+        'to the directory that holds it.',
+    );
+  return found;
+};
+
+// The emulator console's token, which authenticates `auth <token>`.
+export const consoleTokenFile = (home: string = homedir()): string =>
+  join(home, '.emulator_console_auth_token');
