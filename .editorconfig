@@ -1,0 +1,33 @@
+# https://editorconfig.org — the same defaults as the other Fortemate repositories.
+# Prettier reads this file too; the values below are the ones it already uses.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{ts,tsx,js,mjs,cjs,mts,json,yaml,yml,toml,svg,css}]
+indent_style = space
+indent_size = 2
+
+# Markdown: a trailing double space is a hard line break.
+[*.{md,mdx}]
+trim_trailing_whitespace = false
+
+# Written by npm, not by hand.
+[**/package-lock.json]
+insert_final_newline = unset
+trim_trailing_whitespace = unset
+indent_style = unset
+indent_size = unset
+
+# Third-party bytes, kept exactly as published: vendored sounds and licence texts.
+[{native/sounds/**,licenses/**}]
+charset = unset
+end_of_line = unset
+insert_final_newline = unset
+trim_trailing_whitespace = unset
+indent_style = unset
+indent_size = unset

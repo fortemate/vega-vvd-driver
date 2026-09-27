@@ -1,0 +1,75 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+# =============================================================================
+# CodeRabbit configuration — vega-vvd-driver
+# =============================================================================
+# A Node library, CLI and MCP server that drive the Vega Virtual Device through
+# the Android emulator's gRPC API and console.
+#
+# Reviews are requested by hand with an "@coderabbitai review" comment, on pull
+# requests that change code.
+# =============================================================================
+
+language: en-US
+tone_instructions: >-
+  Be concise and specific. No praise and no summary of the diff. Skip style
+  and formatting, which Prettier enforces. Say what breaks and how.
+
+reviews:
+  profile: assertive
+
+  high_level_summary: false
+  poem: false
+  collapse_walkthrough: true
+  review_status: false
+  sequence_diagrams: false
+  suggested_labels: false # labels come from .github/labeler.yml
+  suggested_reviewers: false
+  estimate_code_review_effort: false
+  in_progress_fortune: false
+
+  auto_review:
+    enabled: false
+    drafts: false
+    base_branches:
+      - main
+
+  path_filters:
+    - '!LICENSE'
+    - '!**/package-lock.json'
+
+  tools:
+    actionlint:
+      enabled: true
+    zizmor:
+      enabled: true
+    gitleaks:
+      enabled: true
+    trufflehog:
+      enabled: true
+    shellcheck:
+      enabled: true
+    markdownlint:
+      enabled: false
+    yamllint:
+      enabled: false
+
+  path_instructions:
+    - path: 'src/**'
+      instructions: >-
+        Tokens are secrets: the gRPC bearer token from the discovery file and
+        the console token must never reach a log, an error message, stdout or
+        a file. Nothing may copy or bundle a file from the Vega SDK; the proto
+        is loaded from the user's SDK at run time. Only erasable TypeScript
+        syntax is allowed (the tests run in Node with type stripping), and
+        relative imports keep their .ts extension.
+    - path: 'src/mcp.ts'
+      instructions: >-
+        Every tool must return a tool error (isError) for bad input or a
+        missing device, never throw. Check that input schemas bound the
+        values a model can send.
+    - path: 'README.md'
+      instructions: >-
+        A claim about behaviour must say what it rests on: the Vega Virtual
+        Device, a Fire TV Stick, or a test. The project is unofficial and must
+        never read as made or endorsed by Amazon.

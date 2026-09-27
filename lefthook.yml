@@ -1,0 +1,32 @@
+# Lefthook — Git hooks. `mise run setup` installs them after a clone.
+# Docs: https://github.com/evilmartians/lefthook
+#
+# The same jobs as the other public Fortemate repositories. The history of a
+# public repository is never rewritten, so a secret or non-English text has to
+# be stopped before the commit.
+
+pre-commit:
+  parallel: true
+  jobs:
+    # Secret scanning of the staged diff. Detection only: nothing leaves the machine.
+    - name: betterleaks
+      run: betterleaks git --pre-commit --redact --staged
+
+    # The repository is English-only (test/english.test.ts).
+    - name: english-only
+      run: node --test test/english.test.ts
+
+    - name: prettier
+      glob: '**.{ts,js,mjs,json,md,yaml,yml}'
+      run: npx prettier --write --ignore-unknown --no-error-on-unmatched-pattern {staged_files}
+      stage_fixed: true
+
+    # A broken workflow does not turn red: it silently stops running.
+    - name: workflow-yaml
+      glob: '.github/workflows/*.y*ml'
+      run: actionlint -shellcheck= {staged_files}
+
+pre-push:
+  jobs:
+    - name: prettier-all
+      run: npm run -s format:check

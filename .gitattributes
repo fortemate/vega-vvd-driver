@@ -1,0 +1,35 @@
+# Line endings: LF in the repository and in every checkout, whatever the platform
+# or `core.autocrlf` says. Prettier writes LF, so a CRLF checkout would show every
+# line of every file as changed.
+* text=auto eol=lf
+
+# Binary files are never converted, and their diffs are not shown as text.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.webp  binary
+*.ico   binary
+*.mp3   binary
+*.wav   binary
+*.ogg   binary
+*.m4a   binary
+*.ttf   binary
+*.otf   binary
+*.woff  binary
+*.woff2 binary
+*.zip   binary
+*.vpkg  binary
+
+# Vendored sounds and their licences keep their upstream bytes on every platform.
+# Kenney's licence files use CRLF; without this, `core.autocrlf` rewrites them on
+# commit and the digests in native/sounds/sounds.lock.json stop matching a fresh
+# clone. That happened once in dicechess-assets before it had the same rule.
+# Vendored, so they stay out of the repository's language statistics too.
+native/sounds/** -text linguist-vendored
+
+# Written by scripts rather than by hand: collapsed in pull-request diffs and left
+# out of the language statistics. Change the script and regenerate instead.
+native/src/pieces/*.tsx linguist-generated
+native/src/faces/*.tsx  linguist-generated
+native/src/cueFiles.ts  linguist-generated
