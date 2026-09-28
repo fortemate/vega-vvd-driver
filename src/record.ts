@@ -4,10 +4,11 @@
 // Frames are polled with getScreenshot and written to ffmpeg at a fixed frame
 // rate, repeating the latest frame when the screen is still. The emulator's
 // streamScreenshot was tried first and can stop delivering frames while the
-// screen keeps changing; polling keeps up at about 90 screenshots a second at
-// 1080p. The audio comes from streamAudio. The emulator sends nothing while
-// the device is silent, so the track is rebuilt on the video's clock from each
-// packet's capture time, with silence in the gaps.
+// screen keeps changing. Polling does not stop: on the VVD a 1080p screenshot
+// takes about 17 ms, or 23 to 61 ms while the screen changes. The audio comes
+// from streamAudio. The emulator sends nothing while the device is silent, so
+// the track is rebuilt on the video's clock from each packet's capture time,
+// with silence in the gaps.
 //
 // However a recording ends, it cleans up after itself: ffmpeg is stopped, the
 // audio stream is cancelled and the working directory is removed.

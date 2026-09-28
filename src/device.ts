@@ -311,14 +311,25 @@ export class Device {
     return false;
   }
 
-  // Calls `onFrame` with every distinct frame for `durationMs`. Useful to
-  // check an animation: a 220 ms slide comes through as about ten frames.
+  // Calls `onFrame` with every distinct frame for `durationMs`, or until
+  // `maxFrames` of them have come. Useful to check an animation: on the VVD a
+  // screenshot takes 23 to 61 ms while the screen changes, and a 220 ms slide
+  // comes through as 4 to 6 frames.
+  //
+  // The next screenshot waits for `onFrame`, so keep it quick: encoding a
+  // 1080p PNG takes 20 to 200 ms, and frames that come meanwhile are missed.
+  // Hold the frames and save them once the capture is over, as `vvd frames`
+  // does; `maxFrames` bounds the memory, about 6 MB a frame at 1080p.
   async frames(
     durationMs: number,
     onFrame: (frame: Frame) => void | Promise<void>,
-    options: { intervalMs?: number; signal?: AbortSignal } = {},
+    options: {
+      intervalMs?: number;
+      maxFrames?: number;
+      signal?: AbortSignal;
+    } = {},
   ): Promise<number> {
-    const { signal } = options;
+    const { signal, maxFrames = Infinity } = options;
     const endMs = Date.now() + durationMs;
     let previous: Buffer | undefined;
     let count = 0;
@@ -329,6 +340,7 @@ export class Device {
         previous = frame.data;
         count += 1;
         await onFrame(frame);
+        if (count >= maxFrames) break;
       }
       if (options.intervalMs)
         await sleep(options.intervalMs, undefined, { signal });

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
+import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,6 +26,10 @@ test('the command comes first, then its arguments and options', () => {
   assert.equal(
     parseCli(['record', 'a.mp4', '--no-audio']).values['no-audio'],
     true,
+  );
+  assert.equal(
+    parseCli(['frames', 'out', '--max-frames', '50']).values['max-frames'],
+    '50',
   );
 });
 
@@ -64,6 +68,18 @@ test('a typo in a key fails before any device is looked for', () => {
   });
   assert.equal(result.status, 2);
   assert.match(result.stderr, /unknown key "okk"/);
+});
+
+test('a bad --max-frames fails before a directory is made or a device looked for', () => {
+  const dir = join(mkdtempSync(join(tmpdir(), 'vvd-frames-')), 'out');
+  const result = spawnSync(
+    process.execPath,
+    [BIN, 'frames', dir, '--max-frames', '0'],
+    { encoding: 'utf8' },
+  );
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /--max-frames must be a whole number from 1/);
+  assert.equal(existsSync(dir), false);
 });
 
 test('an unknown command says how to get help', () => {

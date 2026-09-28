@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { enableGrpc } from './console.ts';
-import { Device } from './device.ts';
+import { Device, type Frame } from './device.ts';
 import { findEmulators } from './discovery.ts';
 import { parseKeys } from './keys.ts';
 import { serveStdio } from './mcp.ts';
@@ -31,8 +31,10 @@ Commands:
       --seconds <n>          default 10
       --fps <n>              default 30
       --no-audio             video only
-  frames <dir>               save every distinct frame as a PNG, to check animations
+  frames <dir>               save every distinct frame as a PNG, to check animations;
+                             frames wait in memory, 6 MB each, until the capture ends
       --seconds <n>          default 3
+      --max-frames <n>       stop after this many frames, default 200
   wait-change                exit 0 once the screen changes, 1 on a timeout
       --timeout <ms>         default 5000
   safe-area                  check the outer 5% of the screen against the background;
@@ -59,6 +61,7 @@ export type Parsed = {
     'console-port'?: string;
     gap?: string;
     seconds?: string;
+    'max-frames'?: string;
     fps?: string;
     'no-audio'?: boolean;
     timeout?: string;
@@ -80,6 +83,7 @@ export const parseCli = (argv: readonly string[]): Parsed => {
       'console-port': { type: 'string' },
       gap: { type: 'string' },
       seconds: { type: 'string' },
+      'max-frames': { type: 'string' },
       fps: { type: 'string' },
       'no-audio': { type: 'boolean' },
       timeout: { type: 'string' },
@@ -115,6 +119,43 @@ export const numberOption = (
 };
 
 const stamp = () => new Date().toISOString().replace(/[:.]/g, '-');
+
+// How many frames `vvd frames` holds by default: about 1.2 GB at 1080p.
+export const MAX_FRAMES = 200;
+
+// Captures every distinct frame for `durationMs`, then writes each to `dir`
+// as frame-<ms>ms.png, the milliseconds on the emulator's clock from the
+// first frame. The frames wait in memory until the capture is over: encoding
+// one at 1080p takes 20 to 200 ms, and the next screenshot would wait for it.
+export const saveFrames = async (
+  device: Device,
+  dir: string,
+  options: {
+    durationMs: number;
+    maxFrames?: number;
+    // Replaceable in tests.
+    encode?: (width: number, height: number, rgb: Buffer) => Buffer;
+  },
+): Promise<{ count: number; capped: boolean }> => {
+  const { durationMs, maxFrames = MAX_FRAMES, encode = encodePng } = options;
+  const held: Frame[] = [];
+  const count = await device.frames(
+    durationMs,
+    (frame) => {
+      held.push(frame);
+    },
+    { maxFrames },
+  );
+  const first = held[0]?.timestampUs ?? 0;
+  for (const frame of held) {
+    const ms = Math.round((frame.timestampUs - first) / 1000);
+    writeFileSync(
+      join(dir, `frame-${String(ms).padStart(6, '0')}ms.png`),
+      encode(frame.width, frame.height, frame.data),
+    );
+  }
+  return { count, capped: count >= maxFrames };
+};
 
 export const main = async (argv: readonly string[]): Promise<number> => {
   const { command, positionals, values } = parseCli(argv);
@@ -226,26 +267,29 @@ export const main = async (argv: readonly string[]): Promise<number> => {
         throw new Error(
           'frames needs a directory, for example: vvd frames ./frames --seconds 3',
         );
+      const seconds = numberOption(values.seconds, 'seconds', 3, {
+        min: 0.1,
+        max: 600,
+        integer: false,
+      });
+      const maxFrames = numberOption(
+        values['max-frames'],
+        'max-frames',
+        MAX_FRAMES,
+        { min: 1, max: 10_000 },
+      );
       mkdirSync(dir, { recursive: true });
       const device = connect();
       try {
-        let first: number | undefined;
-        const count = await device.frames(
-          numberOption(values.seconds, 'seconds', 3, {
-            min: 0.1,
-            max: 600,
-            integer: false,
-          }) * 1000,
-          (frame) => {
-            first ??= frame.timestampUs;
-            const ms = Math.round((frame.timestampUs - first) / 1000);
-            writeFileSync(
-              join(dir, `frame-${String(ms).padStart(6, '0')}ms.png`),
-              encodePng(frame.width, frame.height, frame.data),
-            );
-          },
+        const { count, capped } = await saveFrames(device, dir, {
+          durationMs: seconds * 1000,
+          maxFrames,
+        });
+        console.log(
+          capped
+            ? `${count} distinct frames in ${dir}: stopped at --max-frames ${maxFrames} before the ${seconds} s were up`
+            : `${count} distinct frames in ${dir}`,
         );
-        console.log(`${count} distinct frames in ${dir}`);
       } finally {
         device.close();
       }

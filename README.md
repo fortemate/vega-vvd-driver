@@ -59,7 +59,7 @@ vvd record demo.mp4 --seconds 20
 | `vvd press <key…> [--gap 450]`                             | Presses remote keys in order: `up down left right ok back menu playpause rewind fastforward`, a `KEY_*` name or an evdev code. `down*3` repeats, `ok:down` and `ok:up` hold and release |
 | `vvd screenshot [file]`                                    | Saves the screen as a PNG                                                                                                                                                               |
 | `vvd record <file> [--seconds 10] [--fps 30] [--no-audio]` | Records the screen with sound to an MP4. Needs ffmpeg                                                                                                                                   |
-| `vvd frames <dir> [--seconds 3]`                           | Saves every distinct frame as a PNG, named by the emulator's time                                                                                                                       |
+| `vvd frames <dir> [--seconds 3] [--max-frames 200]`        | Saves every distinct frame as a PNG, named by the emulator's time. The frames wait in memory, about 6 MB each, until the capture ends                                                   |
 | `vvd wait-change [--timeout 5000]`                         | Exits 0 once the screen changes, 1 on timeout                                                                                                                                           |
 | `vvd safe-area [--background #rrggbb] [--margin 0.05]`     | Counts what sits in the outer 5% of each edge. Exits 0 when clear                                                                                                                       |
 | `vvd mcp`                                                  | Runs the MCP server on stdio                                                                                                                                                            |
@@ -110,7 +110,7 @@ device.close();
 
 ## Recipes
 
-**Check an animation.** Start `vvd frames ./frames --seconds 3`, then trigger the animation. Each distinct frame lands as a PNG named by the emulator's own clock. On the VVD, a 220 ms move slide in Dice Chess came through as 10 to 11 frames.
+**Check an animation.** Start `vvd frames ./frames --seconds 3`, then trigger the animation. Each distinct frame lands as a PNG named by the emulator's own clock. The frames wait in memory while the capture runs, about 6 MB each at 1080p, and are written when it ends, because encoding one takes 20 to 200 ms and the screen would go unwatched meanwhile. The capture stops at 200 frames, about 1.2 GB, unless `--max-frames` says otherwise. On the VVD on 28 September 2026, with SDK 0.24.12112, the 220 ms pawn slide of Dice Chess's first tutorial move came through with the pawn in flight in 4 to 6 frames, 23 to 55 ms apart. A screenshot takes longer while the screen changes, and that sets the pace.
 
 **Record a demo.** Script the presses, record while they run, and cut the best takes afterwards. Recording works without the device's window.
 
@@ -129,7 +129,7 @@ Measured on the VVD with Vega SDK 0.24.12112 on macOS:
 - **Keys.** The emulator's gRPC `sendKey`, with Linux evdev codes, reaches apps: it is the path the VVD's own on-screen remote uses. OK is `KEY_KPENTER`, and apps receive it as `kpenter`, not the `select` the remote's documentation names. `KEY_SELECT` and `KEY_OK` never arrive, because the emulator's virtual keyboard does not declare them. Back is `KEY_BACK`; `KEY_ESC` does not reach an app as Back.
 - **Dead ends.** The emulator console's `event send`, QEMU's `send-key` and `inputd-cli` on the device all report success and never reach an app.
 - **Home cannot be sent.** `KEY_HOMEPAGE` (172), `KEY_F1` and 170, the code Amazon's Appium documentation gives for Home, all leave the app on screen. To get back to the launcher, run `vega device launch-app -d VirtualDevice -a com.amazon.keplerlauncherapp.main`.
-- **Screenshots.** `getScreenshot` returns 1920x1080. A running process polls it at about 90 screenshots a second; `vvd screenshot` takes about half a second, most of it starting up. The emulator's `streamScreenshot` has delivered only its first frame while the screen kept changing, so the driver polls instead.
+- **Screenshots.** `getScreenshot` returns 1920x1080. A running process polls it in RGB at about 57 screenshots a second of a still screen, 17 ms each, and at 16 to 43 a second while the screen changes, 23 to 61 ms each (measured on 28 September 2026). `vvd screenshot` takes about half a second, most of it starting up. The emulator's `streamScreenshot` has delivered only its first frame while the screen kept changing, so the driver polls instead.
 - **Audio.** `streamAudio` sends nothing while the device is silent. `record` rebuilds the track on the video's clock from each packet's capture time and fills the gaps with silence, so a sound effect stays in sync.
 - **gRPC.** The endpoint is off after every start of the VVD, and the discovery file that the driver reads appears only once `grpc <port>` has been sent to the console. `vvd enable-grpc` does that.
 
