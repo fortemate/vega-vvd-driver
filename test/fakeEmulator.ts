@@ -68,6 +68,9 @@ export const startFakeEmulator = async (
     }
   ).android.emulation.control.EmulatorController;
   const timers = new Set<NodeJS.Timeout>();
+  // Screenshots are stamped as if the display ran at 60 Hz, one frame per
+  // look, so that frames taken within a millisecond still have their own time.
+  const startUs = Date.now() * 1000;
   const server = new Server();
   const fake = {
     keys: [],
@@ -103,7 +106,9 @@ export const startFakeEmulator = async (
       callback(null, {
         format: { format: call.request.format, width: 16, height: 16 },
         image: Buffer.alloc(16 * 16 * 3, shade),
-        timestampUs: String(Date.now() * 1000),
+        timestampUs: String(
+          startUs + Math.round((fake.screenshots * 1e6) / 60),
+        ),
       });
     },
     streamAudio(call: ServerWritableStream<object, object>) {

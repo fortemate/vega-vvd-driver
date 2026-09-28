@@ -1,9 +1,15 @@
 // The Device class against a fake EmulatorController on localhost: what goes
-// over the wire, deadlines, cancellation, and where the token may not go.
+// over the wire, deadlines, cancellation, how `vvd frames` saves what it
+// captures, and where the token may not go.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, readdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { inspect } from 'node:util';
-import { Device, TimeoutError } from '../src/device.ts';
+import { saveFrames } from '../src/cli.ts';
+import { Device, TimeoutError, type Frame } from '../src/device.ts';
+import { encodePng } from '../src/png.ts';
 import {
   PROTO_DIR,
   startFakeEmulator,
@@ -102,6 +108,130 @@ test('frames gives each distinct frame once and ends on time', () =>
     assert.ok(seen.every((shade, i) => i === 0 || shade !== seen[i - 1]));
     assert.ok(Date.now() - started < 1500);
   }));
+
+test('frames stops after maxFrames distinct frames', () =>
+  withDevice('changing', async (device, fake) => {
+    const started = Date.now();
+    assert.equal(await device.frames(10_000, () => {}, { maxFrames: 5 }), 5);
+    assert.equal(fake.screenshots, 5);
+    assert.ok(Date.now() - started < 1500);
+  }));
+
+test('frames refuses a maxFrames that is not a whole number from 1', () =>
+  withDevice('changing', async (device, fake) => {
+    let delivered = 0;
+    const onFrame = () => {
+      delivered += 1;
+    };
+    for (const maxFrames of [0, -1, 1.5, Number.NaN])
+      await assert.rejects(
+        device.frames(1000, onFrame, { maxFrames }),
+        RangeError,
+      );
+    assert.equal(delivered, 0);
+    assert.equal(fake.screenshots, 0);
+  }));
+
+// About as long as encodePng takes for a 1080p frame of a board game.
+const ENCODE_MS = 25;
+
+test('vvd frames encodes nothing until the capture is over', () =>
+  withDevice('changing', async (device, fake) => {
+    const dir = mkdtempSync(join(tmpdir(), 'vvd-frames-'));
+    const started = Date.now();
+    let captureMs: number | undefined;
+    let looks: number | undefined;
+    const encode = (width: number, height: number, rgb: Buffer) => {
+      captureMs ??= Date.now() - started;
+      looks ??= fake.screenshots;
+      // Blocks the thread, as encodePng does.
+      const until = Date.now() + ENCODE_MS;
+      while (Date.now() < until);
+      return encodePng(width, height, rgb);
+    };
+    const result = await saveFrames(device, dir, {
+      durationMs: 10_000,
+      maxFrames: 30,
+      encode,
+    });
+    assert.deepEqual(result, { count: 30, stopped: 'max-frames' });
+    // Every screenshot was taken before the first frame was encoded, so the
+    // capture went at the device's pace. With the encoder between the
+    // screenshots, 30 frames would have taken 29 * 25 ms.
+    assert.equal(looks, fake.screenshots);
+    assert.ok(
+      captureMs !== undefined && captureMs < (29 * ENCODE_MS) / 2,
+      `${captureMs} ms to capture 30 frames`,
+    );
+    const files = readdirSync(dir).sort();
+    assert.equal(files.length, 30);
+    // Named by the emulator's clock from the first frame, 1/60 s apart here.
+    assert.deepEqual(files.slice(0, 4), [
+      'frame-000000ms.png',
+      'frame-000017ms.png',
+      'frame-000033ms.png',
+      'frame-000050ms.png',
+    ]);
+  }));
+
+test('vvd frames saves a still screen as one frame', () =>
+  withDevice('still', async (device) => {
+    const dir = mkdtempSync(join(tmpdir(), 'vvd-frames-'));
+    assert.deepEqual(await saveFrames(device, dir, { durationMs: 200 }), {
+      count: 1,
+      stopped: undefined,
+    });
+    assert.deepEqual(readdirSync(dir), ['frame-000000ms.png']);
+  }));
+
+test('vvd frames stops before the frames it holds pass the memory budget', () =>
+  withDevice('changing', async (device, fake) => {
+    const dir = mkdtempSync(join(tmpdir(), 'vvd-frames-'));
+    // Room for five of the fake's 16x16 frames, 768 bytes each.
+    const result = await saveFrames(device, dir, {
+      durationMs: 10_000,
+      maxBytes: 5 * 768,
+    });
+    assert.deepEqual(result, { count: 5, stopped: 'memory' });
+    // The sixth frame did not fit: it was taken, not kept, and the capture
+    // stopped there with the five it had.
+    assert.equal(fake.screenshots, 6);
+    assert.equal(readdirSync(dir).length, 5);
+  }));
+
+test('vvd frames checks each frame against the memory budget, however large', async () => {
+  // The fake emulator's frames never change size, so a stand-in device
+  // delivers two 16x16 frames and then larger 16x32 ones.
+  let delivered = 0;
+  const growing = {
+    frames: async (
+      _durationMs: number,
+      onFrame: (frame: Frame) => void | Promise<void>,
+      options: { signal?: AbortSignal } = {},
+    ) => {
+      for (const height of [16, 16, 32, 32]) {
+        options.signal?.throwIfAborted();
+        delivered += 1;
+        await onFrame({
+          width: 16,
+          height,
+          data: Buffer.alloc(16 * height * 3, delivered),
+          timestampUs: delivered * 16_667,
+        });
+      }
+      return delivered;
+    },
+  } as unknown as Device;
+  const dir = mkdtempSync(join(tmpdir(), 'vvd-frames-'));
+  // Room for three small frames, but not for two small and a large one.
+  const result = await saveFrames(growing, dir, {
+    durationMs: 10_000,
+    maxBytes: 3 * 768,
+  });
+  assert.deepEqual(result, { count: 2, stopped: 'memory' });
+  assert.equal(delivered, 3);
+  assert.equal(readdirSync(dir).length, 2);
+});
 
 test('a failing device fails the call with its reason', () =>
   withDevice({ failAfter: 1 }, async (device) => {
