@@ -6,10 +6,10 @@ on:
 permissions:
   contents: read
 
-# `vars.RUNS_ON` picks the runner. While this repository is private, its own
-# RUNS_ON variable sends jobs to the organization's self-hosted runner. Delete
-# that variable before the repository goes public: a public repository must
-# never run on the self-hosted runner. Dependabot always gets a hosted runner.
+# `vars.RUNS_ON` resolves to the organization's default, a GitHub-hosted image.
+# This repository is public, so it must never be pointed at the organization's
+# self-hosted runner: a pull request from a fork would run code on it.
+# Dependabot always gets a hosted runner.
 #
 # CI has no Vega Virtual Device, so test/device.test.ts skips itself here; run
 # it locally with `npm run test:device`.
