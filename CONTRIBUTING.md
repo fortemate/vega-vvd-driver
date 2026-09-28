@@ -31,6 +31,15 @@ npm run test:device
 - Never paste a gRPC or console token into an issue, a log or a commit.
 - Never add files from the Vega SDK. Amazon licenses it to each developer.
 
+## Releases
+
+A release is a version on npm, staged by CI and approved by a maintainer:
+
+1. A pull request sets the new version: `npm version <x.y.z> --no-git-tag-version` updates `package.json` and `package-lock.json`.
+2. Once it is merged, publish a GitHub release `v<x.y.z>` from `main`, with generated notes.
+3. `.github/workflows/publish.yaml` checks that the release matches the version, runs the checks and stages the version on npm. It signs in through npm Trusted Publishing, so no token is involved.
+4. A maintainer approves the staged version with 2FA: on npmjs.com under Staged Packages, or with `npm stage approve <id>` (`npm stage list` shows the id). Only then is it public.
+
 ## Licence
 
 By contributing, you agree that your contribution is licensed under the MIT licence of this repository.
