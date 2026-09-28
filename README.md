@@ -32,11 +32,18 @@ Its methods were worked out while building [Dice Chess for Fire TV](https://gith
 
 ## Install
 
+From a clone, which builds the command and puts `vvd` on your PATH:
+
 ```sh
-npm install -g github:fortemate/vega-vvd-driver
+git clone https://github.com/fortemate/vega-vvd-driver
+cd vega-vvd-driver
+npm ci
+npm link
 ```
 
-Or clone the repository, then `npm ci && npm link`.
+Or inside a project: `npm install --save-dev github:fortemate/vega-vvd-driver`, then `npx vvd`.
+
+`npm install -g github:fortemate/vega-vvd-driver` does not work, at least with npm 11.19: for a global install from Git, npm runs the build without installing its dependencies, and it fails with `tsc: command not found`.
 
 ## Quick start
 
@@ -72,7 +79,7 @@ The server lets an agent operate the device and see the result. With Claude Code
 claude mcp add vvd -- vvd mcp
 ```
 
-Other MCP clients start the command `vvd` with the argument `mcp`.
+Other MCP clients start the command `vvd` with the argument `mcp`. With the driver installed inside a project, the command is `npx vvd mcp`.
 
 | Tool              | What it does                                                        |
 | ----------------- | ------------------------------------------------------------------- |
