@@ -32,7 +32,8 @@ Commands:
       --fps <n>              default 30
       --no-audio             video only
   frames <dir>               save every distinct frame as a PNG, to check animations;
-                             frames wait in memory, 6 MB each, until the capture ends
+                             frames wait in memory until the capture ends, 6 MB each
+                             at 1080p, and it stops before they pass 2 GB
       --seconds <n>          default 3
       --max-frames <n>       stop after this many frames, default 200
   wait-change                exit 0 once the screen changes, 1 on a timeout
@@ -123,10 +124,16 @@ const stamp = () => new Date().toISOString().replace(/[:.]/g, '-');
 // How many frames `vvd frames` holds by default: about 1.2 GB at 1080p.
 export const MAX_FRAMES = 200;
 
+// The most memory the held frames may take, whatever --max-frames says and
+// whatever the screen's size: 321 frames at 1080p.
+export const MAX_BYTES = 2_000_000_000;
+
 // Captures every distinct frame for `durationMs`, then writes each to `dir`
 // as frame-<ms>ms.png, the milliseconds on the emulator's clock from the
 // first frame. The frames wait in memory until the capture is over: encoding
 // one at 1080p takes 20 to 200 ms, and the next screenshot would wait for it.
+// The capture stops after `maxFrames`, or before the frames held would pass
+// `maxBytes`; the frames it has are written either way.
 export const saveFrames = async (
   device: Device,
   dir: string,
@@ -134,18 +141,33 @@ export const saveFrames = async (
     durationMs: number;
     maxFrames?: number;
     // Replaceable in tests.
+    maxBytes?: number;
     encode?: (width: number, height: number, rgb: Buffer) => Buffer;
   },
-): Promise<{ count: number; capped: boolean }> => {
-  const { durationMs, maxFrames = MAX_FRAMES, encode = encodePng } = options;
-  const held: Frame[] = [];
-  const count = await device.frames(
+): Promise<{ count: number; stopped: 'max-frames' | 'memory' | undefined }> => {
+  const {
     durationMs,
-    (frame) => {
-      held.push(frame);
-    },
-    { maxFrames },
-  );
+    maxFrames = MAX_FRAMES,
+    maxBytes = MAX_BYTES,
+    encode = encodePng,
+  } = options;
+  const held: Frame[] = [];
+  let bytes = 0;
+  // Fires once another frame of the same size would not fit.
+  const full = new AbortController();
+  try {
+    await device.frames(
+      durationMs,
+      (frame) => {
+        held.push(frame);
+        bytes += frame.data.length;
+        if (bytes + frame.data.length > maxBytes) full.abort();
+      },
+      { maxFrames, signal: full.signal },
+    );
+  } catch (error) {
+    if (!full.signal.aborted) throw error;
+  }
   const first = held[0]?.timestampUs ?? 0;
   for (const frame of held) {
     const ms = Math.round((frame.timestampUs - first) / 1000);
@@ -154,7 +176,10 @@ export const saveFrames = async (
       encode(frame.width, frame.height, frame.data),
     );
   }
-  return { count, capped: count >= maxFrames };
+  let stopped: 'max-frames' | 'memory' | undefined;
+  if (full.signal.aborted) stopped = 'memory';
+  else if (held.length >= maxFrames) stopped = 'max-frames';
+  return { count: held.length, stopped };
 };
 
 export const main = async (argv: readonly string[]): Promise<number> => {
@@ -281,13 +306,17 @@ export const main = async (argv: readonly string[]): Promise<number> => {
       mkdirSync(dir, { recursive: true });
       const device = connect();
       try {
-        const { count, capped } = await saveFrames(device, dir, {
+        const { count, stopped } = await saveFrames(device, dir, {
           durationMs: seconds * 1000,
           maxFrames,
         });
+        const why = {
+          'max-frames': `stopped at --max-frames ${maxFrames}`,
+          memory: `stopped at ${MAX_BYTES / 1e9} GB of frames in memory`,
+        };
         console.log(
-          capped
-            ? `${count} distinct frames in ${dir}: stopped at --max-frames ${maxFrames} before the ${seconds} s were up`
+          stopped
+            ? `${count} distinct frames in ${dir}: ${why[stopped]} before the ${seconds} s were up`
             : `${count} distinct frames in ${dir}`,
         );
       } finally {

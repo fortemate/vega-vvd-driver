@@ -117,6 +117,21 @@ test('frames stops after maxFrames distinct frames', () =>
     assert.ok(Date.now() - started < 1500);
   }));
 
+test('frames refuses a maxFrames that is not a whole number from 1', () =>
+  withDevice('changing', async (device, fake) => {
+    let delivered = 0;
+    const onFrame = () => {
+      delivered += 1;
+    };
+    for (const maxFrames of [0, -1, 1.5, Number.NaN])
+      await assert.rejects(
+        device.frames(1000, onFrame, { maxFrames }),
+        RangeError,
+      );
+    assert.equal(delivered, 0);
+    assert.equal(fake.screenshots, 0);
+  }));
+
 // About as long as encodePng takes for a 1080p frame of a board game.
 const ENCODE_MS = 25;
 
@@ -139,7 +154,7 @@ test('vvd frames encodes nothing until the capture is over', () =>
       maxFrames: 30,
       encode,
     });
-    assert.deepEqual(result, { count: 30, capped: true });
+    assert.deepEqual(result, { count: 30, stopped: 'max-frames' });
     // Every screenshot was taken before the first frame was encoded, so the
     // capture went at the device's pace. With the encoder between the
     // screenshots, 30 frames would have taken 29 * 25 ms.
@@ -164,9 +179,23 @@ test('vvd frames saves a still screen as one frame', () =>
     const dir = mkdtempSync(join(tmpdir(), 'vvd-frames-'));
     assert.deepEqual(await saveFrames(device, dir, { durationMs: 200 }), {
       count: 1,
-      capped: false,
+      stopped: undefined,
     });
     assert.deepEqual(readdirSync(dir), ['frame-000000ms.png']);
+  }));
+
+test('vvd frames stops before the frames it holds pass the memory budget', () =>
+  withDevice('changing', async (device, fake) => {
+    const dir = mkdtempSync(join(tmpdir(), 'vvd-frames-'));
+    // Room for five of the fake's 16x16 frames, 768 bytes each.
+    const result = await saveFrames(device, dir, {
+      durationMs: 10_000,
+      maxBytes: 5 * 768,
+    });
+    assert.deepEqual(result, { count: 5, stopped: 'memory' });
+    // It stopped without taking a sixth screenshot, and kept the five.
+    assert.equal(fake.screenshots, 5);
+    assert.equal(readdirSync(dir).length, 5);
   }));
 
 test('a failing device fails the call with its reason', () =>

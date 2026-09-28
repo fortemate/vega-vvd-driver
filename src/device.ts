@@ -312,9 +312,10 @@ export class Device {
   }
 
   // Calls `onFrame` with every distinct frame for `durationMs`, or until
-  // `maxFrames` of them have come. Useful to check an animation: on the VVD a
-  // screenshot takes 23 to 61 ms while the screen changes, and a 220 ms slide
-  // comes through as 4 to 6 frames.
+  // `maxFrames` of them have come; `maxFrames` is a whole number from 1, and
+  // anything else is refused before the first screenshot. Useful to check an
+  // animation: on the VVD a screenshot takes 23 to 61 ms while the screen
+  // changes, and a 220 ms slide comes through as 4 to 6 frames.
   //
   // The next screenshot waits for `onFrame`, so keep it quick: encoding a
   // 1080p PNG takes 20 to 200 ms, and frames that come meanwhile are missed.
@@ -330,6 +331,11 @@ export class Device {
     } = {},
   ): Promise<number> {
     const { signal, maxFrames = Infinity } = options;
+    const whole = Number.isInteger(maxFrames) && maxFrames >= 1;
+    if (!whole && maxFrames !== Infinity)
+      throw new RangeError(
+        `maxFrames must be a whole number from 1, not ${maxFrames}`,
+      );
     const endMs = Date.now() + durationMs;
     let previous: Buffer | undefined;
     let count = 0;
