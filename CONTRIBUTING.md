@@ -15,6 +15,8 @@ Without mise: `npm ci`, then `npm run check`, `npm run format:check`, `npm test`
 
 The unit tests need neither a device nor ffmpeg. A fake EmulatorController on localhost (`test/fakeEmulator.ts`, with a minimal proto written for the tests), small fake consoles and a stand-in ffmpeg script cover the gRPC, console and recording paths, failures included.
 
+`npm run coverage` runs the same tests with coverage, into `coverage/lcov.info`. CI sends that to SonarQube Cloud, whose analysis is informational: it does not fail the build.
+
 The integration tests need a running Virtual Device with gRPC on. They press left and right on whatever is on screen:
 
 ```sh
