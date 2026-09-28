@@ -11,6 +11,10 @@ run-name: 'Stage ${{ github.event.release.tag_name }} on npm'
 #
 # npm cannot stage a package that does not exist yet, so the first version was
 # published by hand. A release of a version that is already on npm is skipped.
+#
+# Only the stage job can sign in to npm, so it runs as little code as it can:
+# no install scripts of any dependency, no tests, only the build and the stage.
+# The checks and tests run in the verify job, which cannot sign in.
 on:
   release:
     types: [published]
@@ -22,9 +26,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  version:
+  verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       contents: read
     outputs:
@@ -33,6 +37,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '26.8.2' # as in mise.toml
+          package-manager-cache: false
       - name: Match the release to package.json
         id: version
         env:
@@ -50,10 +58,13 @@ jobs:
           else
             echo "stage=true" >> "$GITHUB_OUTPUT"
           fi
+      - run: npm ci --ignore-scripts
+      - run: npm run check
+      - run: npm test
 
   stage:
-    needs: version
-    if: needs.version.outputs.stage == 'true'
+    needs: verify
+    if: needs.verify.outputs.stage == 'true'
     # Trusted Publishing needs a GitHub-hosted runner.
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -77,8 +88,7 @@ jobs:
             if (major < 11 || (major === 11 && minor < 15))
               throw new Error(`staging needs npm 11.15.0 or newer, found ${process.argv[1]}`);
           ' "$(npm --version)"
-      - run: npm ci
-      - run: npm run check
-      - run: npm test
+      - run: npm ci --ignore-scripts
+      - run: npm run build
       - name: Stage the version on npm
-        run: npm stage publish
+        run: npm stage publish --ignore-scripts

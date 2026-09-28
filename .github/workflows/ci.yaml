@@ -20,7 +20,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: jdx/mise-action@v4
-      - run: npm ci
+      # No dependency needs an install script, and none runs one here.
+      - run: npm ci --ignore-scripts
       - run: npm run check
       - run: npm run format:check
       - run: npm test
