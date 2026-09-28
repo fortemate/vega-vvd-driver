@@ -18,6 +18,7 @@ import type {
   ServiceDefinition,
 } from '@grpc/grpc-js';
 import { loadSync } from '@grpc/proto-loader';
+import { encodePng } from '../src/png.ts';
 
 export const PROTO_DIR = join(dirname(fileURLToPath(import.meta.url)), 'fake');
 
@@ -103,9 +104,11 @@ export const startFakeEmulator = async (
         return;
       }
       const shade = screen === 'still' ? 7 : fake.screenshots % 256;
+      const rgb = Buffer.alloc(16 * 16 * 3, shade);
       callback(null, {
         format: { format: call.request.format, width: 16, height: 16 },
-        image: Buffer.alloc(16 * 16 * 3, shade),
+        // As the emulator does, a PNG is sent encoded and RGB888 as it is.
+        image: call.request.format === 'PNG' ? encodePng(16, 16, rgb) : rgb,
         timestampUs: String(
           startUs + Math.round((fake.screenshots * 1e6) / 60),
         ),

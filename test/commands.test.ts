@@ -15,6 +15,7 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { encodePng } from '../src/png.ts';
 import {
   PROTO_DIR,
   startFakeEmulator,
@@ -106,8 +107,14 @@ test('screenshot writes the screen to the file it names', async () => {
   const run = await vvd('still', ['screenshot', file]);
   assert.equal(run.status, 0);
   assert.equal(run.stdout, `${file}\n`);
-  // The fake's picture: 16x16 of shade 7.
-  assert.deepEqual(readFileSync(file), Buffer.alloc(16 * 16 * 3, 7));
+  // The fake's picture, 16x16 of shade 7, as the PNG the emulator sends: a
+  // command that asked for RGB would have written the raw bytes instead.
+  const png = readFileSync(file);
+  assert.deepEqual(
+    [...png.subarray(0, 8)],
+    [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+  );
+  assert.deepEqual(png, encodePng(16, 16, Buffer.alloc(16 * 16 * 3, 7)));
 });
 
 test('frames saves the frames and says what stopped it', async () => {

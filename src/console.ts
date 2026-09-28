@@ -12,6 +12,9 @@ import { consoleTokenFile } from './discovery.ts';
 
 export type ConsoleOptions = {
   port?: number;
+  // 127.0.0.1 by default, which is all the command line and the MCP server
+  // use. Another host is the caller's own choice, and trusted as such: the
+  // token goes to it if it greets as an emulator console.
   host?: string;
   token?: string;
   timeoutMs?: number;
