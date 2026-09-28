@@ -96,40 +96,45 @@ export type FindOptions = {
   alive?: (pid: number) => boolean;
 };
 
+// The emulator a discovery file describes, or undefined when the file names
+// no gRPC port.
+const readEmulator = (file: string, pid: number): Emulator | undefined => {
+  const fields = parseDiscovery(readFileSync(file, 'utf8'));
+  const grpcPort = toPort(fields.get('grpc.port'));
+  if (grpcPort === undefined) return undefined;
+  return Object.defineProperty(
+    {
+      pid,
+      file,
+      grpcPort,
+      consolePort: toPort(fields.get('port.serial')),
+      avdName: fields.get('avd.name') || undefined,
+    },
+    'grpcToken',
+    { value: fields.get('grpc.token') || undefined, enumerable: false },
+  ) as Emulator;
+};
+
 // The running emulators with gRPC on, newest first. Stale files left by an
 // emulator that has exited are skipped.
 export const findEmulators = (options: FindOptions = {}): Emulator[] => {
   const alive = options.alive ?? isAlive;
+  const wanted = (pid: number) =>
+    (options.pid === undefined || pid === options.pid) && alive(pid);
   const found: { emulator: Emulator; modified: number }[] = [];
   for (const directory of options.directories ?? runningDirectories()) {
     if (!existsSync(directory)) continue;
     for (const name of readdirSync(directory)) {
-      const match = /^pid_(\d+)\.ini$/.exec(name);
-      if (!match) continue;
-      const pid = Number(match[1]);
-      if (options.pid !== undefined && pid !== options.pid) continue;
-      if (!alive(pid)) continue;
+      // NaN for a name that is no discovery file.
+      const pid = Number(/^pid_(\d+)\.ini$/.exec(name)?.[1]);
+      if (Number.isNaN(pid) || !wanted(pid)) continue;
       const file = join(directory, name);
-      const fields = parseDiscovery(readFileSync(file, 'utf8'));
-      const grpcPort = toPort(fields.get('grpc.port'));
-      if (grpcPort === undefined) continue;
-      const emulator = Object.defineProperty(
-        {
-          pid,
-          file,
-          grpcPort,
-          consolePort: toPort(fields.get('port.serial')),
-          avdName: fields.get('avd.name') || undefined,
-        },
-        'grpcToken',
-        { value: fields.get('grpc.token') || undefined, enumerable: false },
-      ) as Emulator;
-      found.push({ emulator, modified: statSync(file).mtimeMs });
+      const emulator = readEmulator(file, pid);
+      if (emulator) found.push({ emulator, modified: statSync(file).mtimeMs });
     }
   }
-  return found
-    .sort((a, b) => b.modified - a.modified)
-    .map(({ emulator }) => emulator);
+  found.sort((a, b) => b.modified - a.modified);
+  return found.map(({ emulator }) => emulator);
 };
 
 export class NoDeviceError extends Error {

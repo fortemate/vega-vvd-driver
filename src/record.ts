@@ -331,7 +331,7 @@ export const record = async (
     };
   } finally {
     stopAudio?.();
-    if (encoder && encoder.exitCode === null && encoder.signalCode === null) {
+    if (encoder?.exitCode === null && encoder.signalCode === null) {
       encoder.stdin.destroy();
       encoder.kill('SIGKILL');
     }

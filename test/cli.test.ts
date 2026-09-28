@@ -82,12 +82,46 @@ test('a bad --max-frames fails before a directory is made or a device looked for
   assert.equal(existsSync(dir), false);
 });
 
+test('a bad option fails before any device is looked for', () => {
+  // A home without a device: were one looked for, the error would say so.
+  const env = {
+    ...process.env,
+    HOME: mkdtempSync(join(tmpdir(), 'vvd-home-')),
+    XDG_RUNTIME_DIR: '',
+  };
+  const cases: [string[], RegExp][] = [
+    [['press', 'ok', '--gap', 'soon'], /--gap must be/],
+    [['record', 'take.mp4', '--fps', '0'], /--fps must be/],
+    [['wait-change', '--timeout', '0'], /--timeout must be/],
+    [['safe-area', '--margin', '2'], /--margin must be/],
+    [['safe-area', '--background', 'blue'], /cannot read colour "blue"/],
+  ];
+  for (const [args, message] of cases) {
+    const result = spawnSync(process.execPath, [BIN, ...args], {
+      encoding: 'utf8',
+      env,
+    });
+    assert.equal(result.status, 2, args.join(' '));
+    assert.match(result.stderr, message, args.join(' '));
+  }
+});
+
 test('an unknown command says how to get help', () => {
   const result = spawnSync(process.execPath, [BIN, 'dance'], {
     encoding: 'utf8',
   });
   assert.equal(result.status, 2);
   assert.match(result.stderr, /vvd --help/);
+});
+
+test('names from the object prototype are not commands', () => {
+  for (const name of ['constructor', '__proto__', 'toString']) {
+    const result = spawnSync(process.execPath, [BIN, name], {
+      encoding: 'utf8',
+    });
+    assert.equal(result.status, 2, name);
+    assert.match(result.stderr, /unknown command/, name);
+  }
 });
 
 test('an error exits 2, so that scripts can tell it from "no change"', () => {
