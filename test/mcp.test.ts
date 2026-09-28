@@ -11,6 +11,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { Device } from '../src/device.ts';
 import { createServer } from '../src/mcp.ts';
 import { PROTO_DIR, startFakeEmulator } from './fakeEmulator.ts';
 
@@ -168,6 +169,32 @@ test('a connection that failed is not kept', () =>
     const result = await call(client, 'screenshot');
     assert.equal(result.isError, undefined);
     assert.equal(result.content[0].type, 'image');
+  }));
+
+test('one connection serves the calls until the emulator moves', () =>
+  withServer(async (client, fake) => {
+    // Counted at Device.connect: gRPC can share a socket between clients, so
+    // the fake cannot tell a kept connection from a new one.
+    const connect = Device.connect;
+    let connects = 0;
+    Device.connect = (options) => {
+      connects += 1;
+      return connect.call(Device, options);
+    };
+    const moved = await startFakeEmulator();
+    try {
+      await call(client, 'screenshot');
+      await call(client, 'screenshot');
+      assert.equal(connects, 1);
+      // The same pid now advertises another endpoint, as after a restart.
+      writeFileSync(fake.file, readFileSync(moved.file));
+      assert.equal((await call(client, 'screenshot')).isError, undefined);
+      assert.equal(connects, 2);
+      assert.deepEqual([fake.screenshots, moved.screenshots], [2, 1]);
+    } finally {
+      Device.connect = connect;
+      moved.stop();
+    }
   }));
 
 test('the console port must be one an emulator can have', () =>

@@ -13,7 +13,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { enableGrpc } from './console.ts';
 import { Device } from './device.ts';
-import { findEmulators } from './discovery.ts';
+import { findEmulators, type Emulator } from './discovery.ts';
 import { parseKeys } from './keys.ts';
 import { record } from './record.ts';
 import { checkSafeArea, formatColour, parseColour } from './safearea.ts';
@@ -56,6 +56,10 @@ export const videoPath = (file: string, overwrite = false): string => {
   return path;
 };
 
+// The same emulator, serving the same endpoint with the same token.
+const sameEndpoint = (a: Emulator, b: Emulator): boolean =>
+  a.pid === b.pid && a.grpcPort === b.grpcPort && a.grpcToken === b.grpcToken;
+
 export const createServer = (options: ServerOptions = {}): McpServer => {
   const server = new McpServer({ name: 'vega-vvd-driver', version: VERSION });
   const find = { pid: options.pid, directories: options.directories };
@@ -65,14 +69,7 @@ export const createServer = (options: ServerOptions = {}): McpServer => {
   let device: Device | undefined;
   const connected = (): Device => {
     const [newest] = findEmulators(find);
-    const current = device?.emulator;
-    if (
-      device &&
-      current &&
-      current.pid === newest?.pid &&
-      current.grpcPort === newest.grpcPort &&
-      current.grpcToken === newest.grpcToken
-    )
+    if (device && newest && sameEndpoint(device.emulator, newest))
       return device;
     device?.close();
     device = undefined; // a failed connect below must not leave it cached
