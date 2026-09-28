@@ -153,15 +153,19 @@ export const saveFrames = async (
   } = options;
   const held: Frame[] = [];
   let bytes = 0;
-  // Fires once another frame of the same size would not fit.
+  // Fires at the first frame that does not fit, which is not kept: frames can
+  // differ in size, so each one is checked as it comes.
   const full = new AbortController();
   try {
     await device.frames(
       durationMs,
       (frame) => {
+        if (bytes + frame.data.length > maxBytes) {
+          full.abort();
+          return;
+        }
         held.push(frame);
         bytes += frame.data.length;
-        if (bytes + frame.data.length > maxBytes) full.abort();
       },
       { maxFrames, signal: full.signal },
     );

@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { inspect } from 'node:util';
 import { saveFrames } from '../src/cli.ts';
-import { Device, TimeoutError } from '../src/device.ts';
+import { Device, TimeoutError, type Frame } from '../src/device.ts';
 import { encodePng } from '../src/png.ts';
 import {
   PROTO_DIR,
@@ -193,10 +193,45 @@ test('vvd frames stops before the frames it holds pass the memory budget', () =>
       maxBytes: 5 * 768,
     });
     assert.deepEqual(result, { count: 5, stopped: 'memory' });
-    // It stopped without taking a sixth screenshot, and kept the five.
-    assert.equal(fake.screenshots, 5);
+    // The sixth frame did not fit: it was taken, not kept, and the capture
+    // stopped there with the five it had.
+    assert.equal(fake.screenshots, 6);
     assert.equal(readdirSync(dir).length, 5);
   }));
+
+test('vvd frames checks each frame against the memory budget, however large', async () => {
+  // The fake emulator's frames never change size, so a stand-in device
+  // delivers two 16x16 frames and then larger 16x32 ones.
+  let delivered = 0;
+  const growing = {
+    frames: async (
+      _durationMs: number,
+      onFrame: (frame: Frame) => void | Promise<void>,
+      options: { signal?: AbortSignal } = {},
+    ) => {
+      for (const height of [16, 16, 32, 32]) {
+        options.signal?.throwIfAborted();
+        delivered += 1;
+        await onFrame({
+          width: 16,
+          height,
+          data: Buffer.alloc(16 * height * 3, delivered),
+          timestampUs: delivered * 16_667,
+        });
+      }
+      return delivered;
+    },
+  } as unknown as Device;
+  const dir = mkdtempSync(join(tmpdir(), 'vvd-frames-'));
+  // Room for three small frames, but not for two small and a large one.
+  const result = await saveFrames(growing, dir, {
+    durationMs: 10_000,
+    maxBytes: 3 * 768,
+  });
+  assert.deepEqual(result, { count: 2, stopped: 'memory' });
+  assert.equal(delivered, 3);
+  assert.equal(readdirSync(dir).length, 2);
+});
 
 test('a failing device fails the call with its reason', () =>
   withDevice({ failAfter: 1 }, async (device) => {
