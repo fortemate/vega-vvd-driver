@@ -46,6 +46,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "node --test test/*.test.ts",
+    "coverage": "node -e \"require('node:fs').mkdirSync('coverage', { recursive: true })\" && node --test --experimental-test-coverage --test-coverage-exclude='test/**' --test-reporter=spec --test-reporter-destination=stdout --test-reporter=lcov --test-reporter-destination=coverage/lcov.info test/*.test.ts",
     "test:device": "VVD_INTEGRATION=1 node --test test/device.test.ts",
     "prepare": "npm run build"
   },

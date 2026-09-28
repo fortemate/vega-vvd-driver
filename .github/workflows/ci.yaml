@@ -28,3 +28,30 @@ jobs:
       - run: npm run build
       # The package that npm would publish: the CLI must start from it.
       - run: node dist/bin.js --version
+
+  # SonarQube Cloud analyses the repository from here, with the tests'
+  # coverage; its Automatic Analysis is off, as the two cannot run side by
+  # side. The analysis is informational and does not fail the build. Only the
+  # scan step sees the token, so neither the install nor the tests can read it,
+  # and pull requests from forks, which get no secrets, skip the scan.
+  sonar:
+    if: github.actor != 'dependabot[bot]'
+    runs-on: ${{ fromJSON(vars.RUNS_ON || '["ubuntu-24.04"]') }}
+    timeout-minutes: 15
+    env:
+      HAS_SONAR_TOKEN: ${{ secrets.SONAR_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history, for new-code detection and blame.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: jdx/mise-action@v4
+      - run: npm ci --ignore-scripts
+      - run: npm run coverage
+      - name: SonarQube Scan
+        if: env.HAS_SONAR_TOKEN == 'true'
+        continue-on-error: true
+        uses: SonarSource/sonarqube-scan-action@ba9859eae8dd6bd29e412f25ddbbef3d032000f4 # v8.2.2
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
