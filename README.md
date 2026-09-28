@@ -32,18 +32,13 @@ Its methods were worked out while building [Dice Chess for Fire TV](https://gith
 
 ## Install
 
-From a clone, which builds the command and puts `vvd` on your PATH:
-
 ```sh
-git clone https://github.com/fortemate/vega-vvd-driver
-cd vega-vvd-driver
-npm ci
-npm link
+npm install -g @fortemate/vega-vvd-driver
 ```
 
-Or inside a project: `npm install --save-dev github:fortemate/vega-vvd-driver`, then `npx vvd`.
+Or inside a project: `npm install --save-dev @fortemate/vega-vvd-driver`, then `npx vvd`.
 
-`npm install -g github:fortemate/vega-vvd-driver` does not work, at least with npm 11.19: for a global install from Git, npm runs the build without installing its dependencies, and it fails with `tsc: command not found`.
+To work on the driver itself, clone the repository, then run `npm ci` and `npm link`. Installing straight from Git with `npm install -g github:fortemate/vega-vvd-driver` does not work, at least with npm 11.19: for a global install from Git, npm runs the build without installing its dependencies, and it fails with `tsc: command not found`.
 
 ## Quick start
 

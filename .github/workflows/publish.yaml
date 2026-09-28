@@ -1,0 +1,84 @@
+name: 'CD: Stage on npm'
+run-name: 'Stage ${{ github.event.release.tag_name }} on npm'
+
+# Publishing a GitHub release vX.Y.Z stages that version of the package on
+# npmjs.org. It goes public only when a maintainer approves it with 2FA: on
+# npmjs.com under Staged Packages, or with `npm stage approve <id>`.
+#
+# npm Trusted Publishing signs this workflow in through OIDC, so no npm token
+# is stored anywhere. The package's trusted publisher on npmjs.com names this
+# file, publish.yaml.
+#
+# npm cannot stage a package that does not exist yet, so the first version was
+# published by hand. A release of a version that is already on npm is skipped.
+on:
+  release:
+    types: [published]
+
+permissions: {}
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      stage: ${{ steps.version.outputs.stage }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Match the release to package.json
+        id: version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::release $TAG does not match version $version in package.json"
+            exit 1
+          fi
+          if npm view "$name@$version" version > /dev/null 2>&1; then
+            echo "::notice::$name@$version is already on npm, so there is nothing to stage"
+            echo "stage=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "stage=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  stage:
+    needs: version
+    if: needs.version.outputs.stage == 'true'
+    # Trusted Publishing needs a GitHub-hosted runner.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write # npm Trusted Publishing through OIDC
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '26.8.2' # as in mise.toml
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+      - name: Check that npm can stage
+        run: |
+          # shellcheck disable=SC2016 # JavaScript template literal, not a shell expansion.
+          node -e '
+            const [major, minor] = process.argv[1].split(".").map(Number);
+            if (major < 11 || (major === 11 && minor < 15))
+              throw new Error(`staging needs npm 11.15.0 or newer, found ${process.argv[1]}`);
+          ' "$(npm --version)"
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - name: Stage the version on npm
+        run: npm stage publish
