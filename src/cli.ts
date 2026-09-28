@@ -186,24 +186,32 @@ export const saveFrames = async (
   return { count: held.length, stopped };
 };
 
-export const main = async (argv: readonly string[]): Promise<number> => {
-  const { command, positionals, values } = parseCli(argv);
-  if (values.version) {
-    console.log(VERSION);
-    return 0;
-  }
-  if (values.help || !command) {
-    console.log(USAGE);
-    return command || values.help ? 0 : 2;
-  }
-  const pid =
-    values.pid === undefined
-      ? undefined
-      : numberOption(values.pid, 'pid', 0, { min: 1 });
-  const connect = () => Device.connect({ pid });
+// What a command is given: its arguments and options, and the device to drive.
+type Context = {
+  positionals: string[];
+  values: Parsed['values'];
+  pid: number | undefined;
+};
 
-  switch (command) {
-    case 'devices': {
+// Connects to the device, runs `body` with it, and lets go of the device
+// however `body` ends.
+const withDevice = async <T>(
+  pid: number | undefined,
+  body: (device: Device) => Promise<T>,
+): Promise<T> => {
+  const device = Device.connect({ pid });
+  try {
+    return await body(device);
+  } finally {
+    device.close();
+  }
+};
+
+// The commands by name, each returning its exit status. Options are checked
+// before a device is looked for.
+const COMMANDS: Record<string, (context: Context) => number | Promise<number>> =
+  {
+    devices({ pid }) {
       const devices = findEmulators({ pid });
       if (devices.length === 0) {
         console.log(
@@ -216,8 +224,9 @@ export const main = async (argv: readonly string[]): Promise<number> => {
           `pid ${d.pid}  grpc ${d.grpcPort}  console ${d.consolePort ?? '-'}  ${d.avdName ?? ''}`.trimEnd(),
         );
       return 0;
-    }
-    case 'enable-grpc': {
+    },
+
+    async 'enable-grpc'({ values, pid }) {
       if (pid !== undefined)
         throw new Error(
           'enable-grpc talks to an emulator console, not to a pid: use --console-port',
@@ -235,62 +244,51 @@ export const main = async (argv: readonly string[]): Promise<number> => {
       await enableGrpc(port, { port: consolePort });
       console.log(`gRPC is on at port ${port}.`);
       return 0;
-    }
-    case 'press': {
+    },
+
+    async press({ positionals, values, pid }) {
       if (positionals.length === 0)
         throw new Error(
           'press needs at least one key, for example: vvd press down ok',
         );
       const steps = parseKeys(positionals); // fails before connecting on a typo
-      const device = connect();
-      try {
-        await device.press(steps, {
-          gapMs: numberOption(values.gap, 'gap', 450, { max: 60000 }),
-        });
-      } finally {
-        device.close();
-      }
+      const gapMs = numberOption(values.gap, 'gap', 450, { max: 60000 });
+      await withDevice(pid, (device) => device.press(steps, { gapMs }));
       return 0;
-    }
-    case 'screenshot': {
+    },
+
+    async screenshot({ positionals, pid }) {
       const file = positionals[0] ?? `vvd-${stamp()}.png`;
-      const device = connect();
-      try {
-        const frame = await device.screenshot('png');
-        writeFileSync(file, frame.data);
-        console.log(file);
-      } finally {
-        device.close();
-      }
+      const frame = await withDevice(pid, (device) => device.screenshot('png'));
+      writeFileSync(file, frame.data);
+      console.log(file);
       return 0;
-    }
-    case 'record': {
+    },
+
+    async record({ positionals, values, pid }) {
       const file = positionals[0];
       if (!file)
         throw new Error(
           'record needs a file, for example: vvd record demo.mp4 --seconds 20',
         );
-      const device = connect();
-      try {
-        const result = await record(device, {
-          file,
-          seconds: numberOption(values.seconds, 'seconds', 10, {
-            min: 1,
-            max: 3600,
-            integer: false,
-          }),
-          fps: numberOption(values.fps, 'fps', 30, { min: 1, max: 60 }),
-          audio: !values['no-audio'],
-        });
-        console.log(
-          `${result.file}: ${result.frames} frames, ${result.audioSeconds.toFixed(1)} s of audio`,
-        );
-      } finally {
-        device.close();
-      }
+      const options = {
+        file,
+        seconds: numberOption(values.seconds, 'seconds', 10, {
+          min: 1,
+          max: 3600,
+          integer: false,
+        }),
+        fps: numberOption(values.fps, 'fps', 30, { min: 1, max: 60 }),
+        audio: !values['no-audio'],
+      };
+      const result = await withDevice(pid, (device) => record(device, options));
+      console.log(
+        `${result.file}: ${result.frames} frames, ${result.audioSeconds.toFixed(1)} s of audio`,
+      );
       return 0;
-    }
-    case 'frames': {
+    },
+
+    async frames({ positionals, values, pid }) {
       const dir = positionals[0];
       if (!dir)
         throw new Error(
@@ -308,67 +306,79 @@ export const main = async (argv: readonly string[]): Promise<number> => {
         { min: 1, max: 10_000 },
       );
       mkdirSync(dir, { recursive: true });
-      const device = connect();
-      try {
-        const { count, stopped } = await saveFrames(device, dir, {
-          durationMs: seconds * 1000,
-          maxFrames,
-        });
-        const why = {
-          'max-frames': `stopped at --max-frames ${maxFrames}`,
-          memory: `stopped at ${MAX_BYTES / 1e9} GB of frames in memory`,
-        };
-        console.log(
-          stopped
-            ? `${count} distinct frames in ${dir}: ${why[stopped]} before the ${seconds} s were up`
-            : `${count} distinct frames in ${dir}`,
-        );
-      } finally {
-        device.close();
-      }
+      const { count, stopped } = await withDevice(pid, (device) =>
+        saveFrames(device, dir, { durationMs: seconds * 1000, maxFrames }),
+      );
+      const why = {
+        'max-frames': `stopped at --max-frames ${maxFrames}`,
+        memory: `stopped at ${MAX_BYTES / 1e9} GB of frames in memory`,
+      };
+      console.log(
+        stopped
+          ? `${count} distinct frames in ${dir}: ${why[stopped]} before the ${seconds} s were up`
+          : `${count} distinct frames in ${dir}`,
+      );
       return 0;
-    }
-    case 'wait-change': {
-      const device = connect();
-      try {
-        const changed = await device.waitForChange({
-          timeoutMs: numberOption(values.timeout, 'timeout', 5000, {
-            min: 1,
-            max: 3_600_000,
-          }),
-        });
-        console.log(changed ? 'changed' : 'no change');
-        return changed ? 0 : 1;
-      } finally {
-        device.close();
-      }
-    }
-    case 'safe-area': {
-      const device = connect();
-      try {
-        const frame = await device.screenshot('rgb');
-        const report = checkSafeArea(frame.data, frame.width, frame.height, {
-          background: values.background
-            ? parseColour(values.background)
-            : undefined,
-          margin: numberOption(values.margin, 'margin', 0.05, {
-            min: 0.01,
-            max: 0.25,
-            integer: false,
-          }),
-        });
-        console.log(
-          `${report.clear ? 'clear' : 'NOT clear'}: left=${report.left} right=${report.right} top=${report.top} bottom=${report.bottom} (background ${formatColour(report.background)})`,
-        );
-        return report.clear ? 0 : 1;
-      } finally {
-        device.close();
-      }
-    }
-    case 'mcp':
+    },
+
+    async 'wait-change'({ values, pid }) {
+      const timeoutMs = numberOption(values.timeout, 'timeout', 5000, {
+        min: 1,
+        max: 3_600_000,
+      });
+      const changed = await withDevice(pid, (device) =>
+        device.waitForChange({ timeoutMs }),
+      );
+      console.log(changed ? 'changed' : 'no change');
+      return changed ? 0 : 1;
+    },
+
+    async 'safe-area'({ values, pid }) {
+      const options = {
+        background: values.background
+          ? parseColour(values.background)
+          : undefined,
+        margin: numberOption(values.margin, 'margin', 0.05, {
+          min: 0.01,
+          max: 0.25,
+          integer: false,
+        }),
+      };
+      const frame = await withDevice(pid, (device) => device.screenshot('rgb'));
+      const report = checkSafeArea(
+        frame.data,
+        frame.width,
+        frame.height,
+        options,
+      );
+      console.log(
+        `${report.clear ? 'clear' : 'NOT clear'}: left=${report.left} right=${report.right} top=${report.top} bottom=${report.bottom} (background ${formatColour(report.background)})`,
+      );
+      return report.clear ? 0 : 1;
+    },
+
+    async mcp({ pid }) {
       await serveStdio({ pid });
       return -1; // keeps running until the client disconnects
-    default:
-      throw new Error(`unknown command "${command}". Run vvd --help.`);
+    },
+  };
+
+export const main = async (argv: readonly string[]): Promise<number> => {
+  const { command, positionals, values } = parseCli(argv);
+  if (values.version) {
+    console.log(VERSION);
+    return 0;
   }
+  if (values.help || !command) {
+    console.log(USAGE);
+    return command || values.help ? 0 : 2;
+  }
+  const pid =
+    values.pid === undefined
+      ? undefined
+      : numberOption(values.pid, 'pid', 0, { min: 1 });
+  // Own names only, so that "constructor" and the like are not commands.
+  if (!Object.hasOwn(COMMANDS, command))
+    throw new Error(`unknown command "${command}". Run vvd --help.`);
+  return COMMANDS[command]({ positionals, values, pid });
 };

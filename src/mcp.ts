@@ -69,8 +69,7 @@ export const createServer = (options: ServerOptions = {}): McpServer => {
     if (
       device &&
       current &&
-      newest &&
-      current.pid === newest.pid &&
+      current.pid === newest?.pid &&
       current.grpcPort === newest.grpcPort &&
       current.grpcToken === newest.grpcToken
     )
