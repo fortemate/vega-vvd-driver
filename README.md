@@ -14,15 +14,17 @@ Its methods were worked out while building [Dice Chess for Fire TV](https://gith
 
 ## Appium or this driver?
 
-| To…                                                 | Use                    |
-| --------------------------------------------------- | ---------------------- |
-| find elements, read their text, run a test suite    | Appium                 |
-| test on a Fire TV Stick                             | Appium                 |
-| press keys or take a screenshot from a shell script | this driver, or Appium |
-| record a video with sound                           | this driver            |
-| capture every frame of an animation                 | this driver            |
-| let an AI agent see and operate the VVD over MCP    | this driver            |
-| check the TV safe area                              | this driver            |
+| To…                                                 | Appium | this driver |
+| :-------------------------------------------------- | :----: | :---------: |
+| find elements, read their text, run a test suite    |   ✅   |      —      |
+| test on a Fire TV Stick                             |   ✅   |      —      |
+| press keys or take a screenshot from a shell script |   ✅   |     ✅      |
+| record a video with sound                           |   —    |     ✅      |
+| capture every frame of an animation                 |   —    |     ✅      |
+| let an AI agent see and operate the VVD over MCP    |   —    |     ✅      |
+| check the TV safe area                              |   ◯    |     ✅      |
+
+✅ a good fit · ◯ possible with your own code (take a screenshot, then check its edges) · — not supported
 
 ## What you need
 
