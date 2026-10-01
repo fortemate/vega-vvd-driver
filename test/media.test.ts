@@ -172,26 +172,29 @@ test('a silence between two sounds stays where it was', () => {
   assert.equal(frameAt(track, Math.round((later / 2 / 1e6) * 44100)), 0);
 });
 
-test('a stream that starts with small packets keeps the rest of the sound on the clock', () => {
+test('a stream that starts with small packets keeps the rest of the sound on the clock, with no hole after its start', () => {
   const start = 0;
-  // Four packets of 55 frames, 10 ms apart, then the usual 512-frame packets,
-  // whose times say where the sound really is.
-  const small = Array.from({ length: 4 }, (_, i) => ({
+  // Twelve packets of 55 frames, 10 ms apart, so that their times run 135 ms
+  // ahead of their audio, then the usual 512-frame packets, whose times say
+  // where the sound really is.
+  const small = Array.from({ length: 12 }, (_, i) => ({
     timestampUs: 100_000 + i * 10_000,
     pcm: counted(55, 1 + i * 55),
   }));
-  const steadyStart = 150_000;
-  const rest = Array.from({ length: 30 }, (_, i) => ({
+  const steadyStart = 250_000;
+  const rest = Array.from({ length: 60 }, (_, i) => ({
     timestampUs: Math.round(steadyStart + ((i * 512) / 44100) * 1e6),
-    pcm: counted(512, 221 + i * 512),
+    pcm: counted(512, 661 + i * 512),
   }));
   const track = assembleAudio([...small, ...rest], start, 1);
   const steadyAt = Math.round((steadyStart / 1e6) * 44100);
-  // The first 512-frame packet lands at its own time, the small ones just
-  // before it, back to back.
-  assert.equal(frameAt(track, steadyAt), 221);
-  assert.equal(frameAt(track, steadyAt - 220), 1);
-  assert.equal(frameAt(track, steadyAt - 221), 0);
+  // The first 512-frame packet lands at its own time, and the small ones just
+  // before it, back to back: every frame in order.
+  assert.equal(frameAt(track, steadyAt), 661);
+  assert.equal(frameAt(track, steadyAt - 660), 1);
+  assert.equal(frameAt(track, steadyAt - 661), 0);
+  for (let i = 0; i < 660 + 60 * 512; i++)
+    assert.equal(frameAt(track, steadyAt - 660 + i), 1 + i, `frame ${i}`);
 });
 
 test('a long sound that drifts from the clock is put back on it', () => {

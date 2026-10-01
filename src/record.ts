@@ -109,9 +109,13 @@ const FRAME_BYTES = 4; // 16-bit stereo
 // of them is placed as a whole where the capture times agree best: their
 // median. A run ends where the device sent nothing, a silence that leaves a
 // step in time longer than SILENCE_US, and where it has drifted from the clock
-// by more than DRIFT_US.
+// by more than DRIFT_US. Its first SETTLE_US are not held to the clock: there
+// the small packets' capture times run ahead of their audio, by more than
+// DRIFT_US at the start of some sounds, and splitting there would cut a hole
+// just after the sound begins.
 const SILENCE_US = 50_000;
 const DRIFT_US = 100_000;
+const SETTLE_US = 500_000;
 
 const framesOf = (packet: AudioPacket): number =>
   Math.floor(packet.pcm.length / FRAME_BYTES);
@@ -154,9 +158,9 @@ const anchorOf = (run: readonly AudioPacket[], startUs: number): number => {
   return offsets[Math.floor(offsets.length / 2)];
 };
 
-// The run split where a packet has drifted more than DRIFT_US from the place
-// the run gives it, so a long sound follows the clock: the part before the
-// first such packet, and the rest.
+// The run split where a packet, past the run's first SETTLE_US of audio, has
+// drifted more than DRIFT_US from the place the run gives it, so a long sound
+// follows the clock: the part before the first such packet, and the rest.
 const steady = (
   run: readonly AudioPacket[],
   startUs: number,
@@ -165,7 +169,7 @@ const steady = (
   let before = 0;
   for (let i = 0; i < run.length; i++) {
     const drift = run[i].timestampUs - startUs - (anchor + usOf(before));
-    if (i > 0 && Math.abs(drift) > DRIFT_US)
+    if (usOf(before) > SETTLE_US && Math.abs(drift) > DRIFT_US)
       return [run.slice(0, i), run.slice(i)];
     before += framesOf(run[i]);
   }
