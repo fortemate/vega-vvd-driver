@@ -7,8 +7,8 @@
 // screen keeps changing. Polling does not stop: on the VVD a 1080p screenshot
 // takes about 17 ms, or 23 to 61 ms while the screen changes. The audio comes
 // from streamAudio. The emulator sends nothing while the device is silent, so
-// the track is rebuilt on the video's clock from each packet's capture time,
-// with silence in the gaps.
+// the track is rebuilt on the video's clock from the packets' capture times,
+// with silence in the gaps; see assembleAudio for how.
 //
 // However a recording ends, it cleans up after itself: ffmpeg is stopped, the
 // audio stream is cancelled and the working directory is removed.
@@ -101,33 +101,109 @@ const abortable = <T>(
 const SAMPLE_RATE = 44100;
 const FRAME_BYTES = 4; // 16-bit stereo
 
+// A packet's capture time wanders by about ±10 ms around where the packet
+// before it ends, and a stream starts with smaller packets (#13). Laid each at
+// its own time, the packets of one sound would leave holes and cut into each
+// other several times a second, which is heard as a rattle. So consecutive
+// packets are laid back to back, the way the device played them, and each run
+// of them is placed as a whole where the capture times agree best: their
+// median. A run ends where the device sent nothing, a silence that leaves a
+// step in time longer than SILENCE_US, and where it has drifted from the clock
+// by more than DRIFT_US. Its first SETTLE_US are not held to the clock: there
+// the small packets' capture times run ahead of their audio, by more than
+// DRIFT_US at the start of some sounds, and splitting there would cut a hole
+// just after the sound begins.
+const SILENCE_US = 50_000;
+const DRIFT_US = 100_000;
+const SETTLE_US = 500_000;
+
+const framesOf = (packet: AudioPacket): number =>
+  Math.floor(packet.pcm.length / FRAME_BYTES);
+
+const usOf = (frames: number): number => (frames / SAMPLE_RATE) * 1e6;
+
+// The packets in the order they arrived, which is the order they were played,
+// cut into runs at each silence.
+const runsOf = (packets: readonly AudioPacket[]): AudioPacket[][] => {
+  const runs: AudioPacket[][] = [];
+  let run: AudioPacket[] = [];
+  for (const packet of packets) {
+    const last = run.at(-1);
+    if (
+      last &&
+      Math.abs(packet.timestampUs - (last.timestampUs + usOf(framesOf(last)))) >
+        SILENCE_US
+    ) {
+      runs.push(run);
+      run = [];
+    }
+    run.push(packet);
+  }
+  if (run.length) runs.push(run);
+  return runs;
+};
+
+// Where a run's first frame belongs on a clock that starts at `startUs`, in
+// microseconds: each packet's capture time less the audio before it in the
+// run, and the median of those, which jitter and the first small packets do
+// not move.
+const anchorOf = (run: readonly AudioPacket[], startUs: number): number => {
+  let before = 0;
+  const offsets = run.map((packet) => {
+    const offset = packet.timestampUs - startUs - usOf(before);
+    before += framesOf(packet);
+    return offset;
+  });
+  offsets.sort((a, b) => a - b);
+  return offsets[Math.floor(offsets.length / 2)];
+};
+
+// The run split where a packet, past the run's first SETTLE_US of audio, has
+// drifted more than DRIFT_US from the place the run gives it, so a long sound
+// follows the clock: the part before the first such packet, and the rest.
+const steady = (
+  run: readonly AudioPacket[],
+  startUs: number,
+): [AudioPacket[], AudioPacket[]] => {
+  const anchor = anchorOf(run, startUs);
+  let before = 0;
+  for (let i = 0; i < run.length; i++) {
+    const drift = run[i].timestampUs - startUs - (anchor + usOf(before));
+    if (usOf(before) > SETTLE_US && Math.abs(drift) > DRIFT_US)
+      return [run.slice(0, i), run.slice(i)];
+    before += framesOf(run[i]);
+  }
+  return [[...run], []];
+};
+
 // Lays audio packets on a timeline that starts at `startUs` and lasts
-// `seconds`, as 16-bit stereo PCM: silence where nothing arrived, and a packet
-// that starts earlier than the audio before it overwrites the overlap. Packets
-// captured before the start are cut; the result is exactly as long as asked.
+// `seconds`, as 16-bit stereo PCM, with silence where nothing arrived. Audio
+// placed before the start is cut, and past the end is dropped; the result is
+// exactly as long as asked. Where two runs overlap, the later one is heard.
 export const assembleAudio = (
   packets: readonly AudioPacket[],
   startUs: number,
   seconds: number,
 ): Buffer => {
   const track = Buffer.alloc(Math.round(seconds * SAMPLE_RATE) * FRAME_BYTES);
-  for (const packet of packets) {
-    const frames = Math.floor(packet.pcm.length / FRAME_BYTES);
-    let offset = Math.round(
-      ((packet.timestampUs - startUs) / 1e6) * SAMPLE_RATE,
-    );
-    let from = 0;
-    if (offset < 0) {
-      from = -offset;
-      offset = 0;
+  const pending = runsOf(packets);
+  while (pending.length) {
+    const [run, rest] = steady(pending.shift() as AudioPacket[], startUs);
+    if (rest.length) pending.unshift(rest);
+    let offset = Math.round((anchorOf(run, startUs) / 1e6) * SAMPLE_RATE);
+    for (const packet of run) {
+      const frames = framesOf(packet);
+      const from = Math.max(0, -offset);
+      const at = offset + from;
+      offset += frames;
+      if (from >= frames || at * FRAME_BYTES >= track.length) continue;
+      packet.pcm.copy(
+        track,
+        at * FRAME_BYTES,
+        from * FRAME_BYTES,
+        frames * FRAME_BYTES,
+      );
     }
-    if (from >= frames || offset * FRAME_BYTES >= track.length) continue;
-    packet.pcm.copy(
-      track,
-      offset * FRAME_BYTES,
-      from * FRAME_BYTES,
-      frames * FRAME_BYTES,
-    );
   }
   return track;
 };
