@@ -97,7 +97,7 @@ export const createServer = (options: ServerOptions = {}): McpServer => {
       title: 'List running Vega Virtual Devices',
       description:
         'Lists the running Vega Virtual Devices whose gRPC endpoint is on. An empty list usually means gRPC is off: call enable_grpc.',
-      annotations: { readOnlyHint: true },
+      annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async () => {
       const devices = findEmulators({ directories: options.directories }).map(
@@ -134,6 +134,12 @@ export const createServer = (options: ServerOptions = {}): McpServer => {
           .multipleOf(2)
           .optional()
           .describe('The emulator console, an even port; default 5554'),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
       },
     },
     async ({ grpc_port, console_port }) => {
@@ -176,6 +182,14 @@ export const createServer = (options: ServerOptions = {}): McpServer => {
           .optional()
           .describe('Return a screenshot once the keys are pressed'),
       },
+      // A key press can confirm anything the app on screen offers, a delete
+      // included.
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
     },
     async ({ keys, gap_ms, screenshot_after }, { signal }) => {
       try {
@@ -201,7 +215,7 @@ export const createServer = (options: ServerOptions = {}): McpServer => {
       title: 'Take a screenshot',
       description:
         'Returns the current screen of the Vega Virtual Device as a PNG image (1920x1080).',
-      annotations: { readOnlyHint: true },
+      annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ signal }) => {
       try {
@@ -227,7 +241,7 @@ export const createServer = (options: ServerOptions = {}): McpServer => {
           .optional()
           .describe('Default 5000'),
       },
-      annotations: { readOnlyHint: true },
+      annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ timeout_ms }, { signal }) => {
       try {
@@ -271,6 +285,13 @@ export const createServer = (options: ServerOptions = {}): McpServer => {
           .optional()
           .describe('Replace an existing file; default false'),
       },
+      // Destructive only with overwrite, which replaces an existing file.
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
     },
     async ({ file, seconds, fps, audio, overwrite }, { signal }) => {
       try {
@@ -310,7 +331,7 @@ export const createServer = (options: ServerOptions = {}): McpServer => {
           .optional()
           .describe('Fraction of each edge, default 0.05'),
       },
-      annotations: { readOnlyHint: true },
+      annotations: { readOnlyHint: true, openWorldHint: false },
     },
     async ({ background, margin }, { signal }) => {
       try {
