@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+#MISE description="✅ Release step 3: approve the staged version on npm, with 2FA"
+#MISE raw=true
+#USAGE arg "[stage_id]" help="The id from the list this task prints without one"
+#
+# Without an id, lists the package's staged versions. With one, shows it and
+# approves it; npm asks for the one-time password. Needs `npm login` first.
+set -euo pipefail
+
+name=$(node -p "require('./package.json').name")
+id=${usage_stage_id:-}
+
+if [[ -z $id ]]; then
+  npm stage list "$name"
+  echo
+  echo "Approve one with: mise run release:approve <id>"
+  exit 0
+fi
+npm stage view "$id"
+npm stage approve "$id"

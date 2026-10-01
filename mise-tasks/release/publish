@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+#MISE description="🚀 Release step 2: publish the GitHub release for the version on main, and watch CD stage it"
+#MISE raw=true
+#
+# Reads the version from origin/main and asks before publishing the GitHub
+# release v<version> with generated notes. Then follows publish.yaml until it
+# has staged that version on npm. Run `mise run release:approve` next.
+set -euo pipefail
+
+on_main() {
+  git show origin/main:package.json | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).$1"
+}
+
+git fetch --quiet origin main
+commit=$(git rev-parse origin/main)
+name=$(on_main name)
+version=$(on_main version)
+tag=v$version
+
+if gh release view "$tag" > /dev/null 2>&1; then
+  echo "$tag is already released. For a new version, start with: mise run release:prepare <x.y.z>" >&2
+  exit 2
+fi
+if npm view "$name@$version" version > /dev/null 2>&1; then
+  echo "$name@$version is already on npm. For a new version, start with: mise run release:prepare <x.y.z>" >&2
+  exit 2
+fi
+
+echo "main is at $(git log -1 --format='%h %s' "$commit")"
+read -r -p "Publish the GitHub release $tag from it? [y/N] " answer
+if [[ $answer != [yY] ]]; then
+  echo "Nothing published."
+  exit 1
+fi
+gh release create "$tag" --target "$commit" --title "$tag" --generate-notes
+
+# The release starts publish.yaml; give GitHub a moment to list the run.
+run=
+for _ in {1..30}; do
+  run=$(gh run list --workflow publish.yaml --event release --branch "$tag" --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+  [[ -n $run ]] && break
+  sleep 2
+done
+if [[ -z $run ]]; then
+  echo "The release is published, but its publish.yaml run has not appeared. Check the Actions tab." >&2
+  exit 1
+fi
+gh run watch "$run" --exit-status
+
+echo
+echo "$name@$version is staged. Next: mise run release:approve"
