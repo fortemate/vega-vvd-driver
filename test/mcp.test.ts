@@ -38,6 +38,20 @@ test('the server offers the driver tools', async () => {
     assert.deepEqual(tools.map((tool) => tool.name).sort(), TOOLS);
     const press = tools.find((tool) => tool.name === 'press_keys');
     assert.deepEqual(press?.inputSchema.required, ['keys']);
+    // Every tool says whether it changes anything, and none reaches beyond
+    // the local device.
+    const annotations = Object.fromEntries(
+      tools.map((tool) => [tool.name, tool.annotations]),
+    );
+    for (const name of TOOLS) {
+      assert.equal(annotations[name]?.openWorldHint, false, name);
+      assert.equal(typeof annotations[name]?.readOnlyHint, 'boolean', name);
+    }
+    const changing = TOOLS.filter((name) => !annotations[name]?.readOnlyHint);
+    assert.deepEqual(changing, ['enable_grpc', 'press_keys', 'record_video']);
+    assert.equal(annotations.enable_grpc?.destructiveHint, false);
+    assert.equal(annotations.press_keys?.destructiveHint, true);
+    assert.equal(annotations.record_video?.destructiveHint, true);
   } finally {
     await client.close();
   }

@@ -92,6 +92,8 @@ Then ask, for example: "Open Settings in the app on the Virtual Device, turn the
 
 A model chooses the arguments, so they are bounded: at most 100 key presses per call, recordings of up to 600 seconds, and `record_video` writes only a new `.mp4`, `.mov` or `.mkv` file, unless it is told to `overwrite` one. When the client cancels a call, its presses, wait or recording stop. `vvd mcp --pid <n>` ties the server to one device.
 
+Each tool declares MCP annotations, for a client that asks before a call that changes something. Four tools only read. `enable_grpc` only turns on the emulator's gRPC endpoint. `press_keys` and `record_video` are marked destructive: a key press can confirm a delete in the app on screen, and `overwrite` replaces a file. None reaches beyond the local device.
+
 ## As a library
 
 ```ts
