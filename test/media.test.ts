@@ -114,6 +114,112 @@ test('audio before the start is cut, and past the end is dropped', () => {
   assert.equal(track.length, 44100 * 4);
 });
 
+// Packets whose frames count up from `first`, on both channels, so that a test
+// can tell whether every frame landed in order.
+const counted = (frames: number, first: number) => {
+  const pcm = Buffer.alloc(frames * 4);
+  for (let i = 0; i < frames; i++) {
+    pcm.writeInt16LE(first + i, i * 4);
+    pcm.writeInt16LE(first + i, i * 4 + 2);
+  }
+  return pcm;
+};
+
+const frameAt = (track: Buffer, frame: number) => track.readInt16LE(frame * 4);
+
+// What the VVD sends while a sound plays (#13): packets of 512 frames whose
+// capture times wander by up to 10 ms around where the packet before ends.
+const JITTER_MS = [9, -7, 3, -10, 6, -2, 10, -9, 1, -5, 8, -4];
+const wandering = (start: number, count: number, from = 1) =>
+  Array.from({ length: count }, (_, i) => ({
+    timestampUs: Math.round(
+      start +
+        ((i * 512) / 44100) * 1e6 +
+        JITTER_MS[i % JITTER_MS.length] * 1000,
+    ),
+    pcm: counted(512, from + i * 512),
+  }));
+
+test('packets whose capture times wander are laid back to back, with no hole and nothing lost', () => {
+  const start = 5_000_000;
+  const packets = wandering(start + 200_000, 40);
+  const track = assembleAudio(packets, start, 1);
+  const first = Math.round(0.2 * 44100);
+  // Within a few frames of where the sound started, by the median.
+  let at = first - 500;
+  while (frameAt(track, at) === 0) at++;
+  assert.ok(Math.abs(at - first) <= 441, `starts ${at - first} frames off`);
+  for (let i = 0; i < 40 * 512; i++)
+    assert.equal(frameAt(track, at + i), 1 + i, `frame ${i}`);
+  assert.equal(frameAt(track, at + 40 * 512), 0);
+});
+
+test('a silence between two sounds stays where it was', () => {
+  const start = 0;
+  const first = wandering(start, 10);
+  // 300 ms after the first sound ends, the second begins.
+  const later = ((10 * 512) / 44100) * 1e6 + 300_000;
+  const second = wandering(start + later, 10, 20_001);
+  const track = assembleAudio([...first, ...second], start, 1);
+  const secondAt = Math.round((later / 1e6) * 44100);
+  let at = secondAt - 600;
+  while (frameAt(track, at) !== 20_001) at++;
+  assert.ok(
+    Math.abs(at - secondAt) <= 441,
+    `second sound ${at - secondAt} frames off`,
+  );
+  assert.equal(frameAt(track, at - 1), 0);
+  assert.equal(frameAt(track, Math.round((later / 2 / 1e6) * 44100)), 0);
+});
+
+test('a stream that starts with small packets keeps the rest of the sound on the clock', () => {
+  const start = 0;
+  // Four packets of 55 frames, 10 ms apart, then the usual 512-frame packets,
+  // whose times say where the sound really is.
+  const small = Array.from({ length: 4 }, (_, i) => ({
+    timestampUs: 100_000 + i * 10_000,
+    pcm: counted(55, 1 + i * 55),
+  }));
+  const steadyStart = 150_000;
+  const rest = Array.from({ length: 30 }, (_, i) => ({
+    timestampUs: Math.round(steadyStart + ((i * 512) / 44100) * 1e6),
+    pcm: counted(512, 221 + i * 512),
+  }));
+  const track = assembleAudio([...small, ...rest], start, 1);
+  const steadyAt = Math.round((steadyStart / 1e6) * 44100);
+  // The first 512-frame packet lands at its own time, the small ones just
+  // before it, back to back.
+  assert.equal(frameAt(track, steadyAt), 221);
+  assert.equal(frameAt(track, steadyAt - 220), 1);
+  assert.equal(frameAt(track, steadyAt - 221), 0);
+});
+
+test('a long sound that drifts from the clock is put back on it', () => {
+  const start = 0;
+  // Capture times that run 2% ahead of the audio, for 10 s.
+  const count = Math.round((10 * 44100) / 512);
+  const packets = Array.from({ length: count }, (_, i) => ({
+    timestampUs: Math.round(((i * 512) / 44100) * 1e6 * 1.02),
+    pcm: counted(512, 1 + (i % 50) * 512),
+  }));
+  const track = assembleAudio(packets, start, 11);
+  // The last packet is no further from its time than the drift allowed.
+  const last = packets.at(-1) as { timestampUs: number };
+  const lastAt = Math.round((last.timestampUs / 1e6) * 44100);
+  const value = 1 + ((count - 1) % 50) * 512;
+  let found = -1;
+  for (let at = lastAt - 6000; at <= lastAt + 6000; at++)
+    if (frameAt(track, at) === value && frameAt(track, at + 1) === value + 1) {
+      found = at;
+      break;
+    }
+  assert.ok(found >= 0, 'the last packet is within 136 ms of its time');
+  assert.ok(
+    Math.abs(found - lastAt) <= 4410 + 441,
+    `${found - lastAt} frames off`,
+  );
+});
+
 test('with no audio at all the track is silence of the right length', () => {
   const track = assembleAudio([], 0, 2);
   assert.equal(track.length, 2 * 44100 * 4);
