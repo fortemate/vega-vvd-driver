@@ -1,6 +1,6 @@
 {
   "name": "@fortemate/vega-vvd-driver",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Unofficial driver for the Vega Virtual Device: remote keys, screenshots and video with sound, from scripts and AI agents. CLI, Node library and MCP server.",
   "keywords": [
     "vega",
