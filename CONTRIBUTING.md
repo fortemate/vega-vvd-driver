@@ -37,7 +37,7 @@ npm run test:device
 
 A release is a version on npm, staged by CI and approved by a maintainer. Three mise tasks walk through it; `mise tasks` lists them.
 
-1. `mise run release:prepare <x.y.z>` opens the pull request that sets the version. It branches `chore/release-<x.y.z>` from `origin/main`, runs `npm version <x.y.z> --no-git-tag-version` and `mise run check`, then commits, pushes and opens the pull request. It refuses a version that is not newer than the one on `main`, and a checkout with uncommitted changes. A maintainer reviews and merges the pull request.
+1. `mise run release:prepare <version>` opens the pull request that sets the version. `<version>` is `patch`, `minor`, `major`, or an explicit `x.y.z`. It branches `chore/release-<x.y.z>` from `origin/main`, runs `npm version <x.y.z> --no-git-tag-version` and `mise run check`, then commits, pushes and opens the pull request. It refuses a version that is not newer than the one on `main`, and a checkout with uncommitted changes. A maintainer reviews and merges the pull request.
 2. `mise run release:publish` reads the version on `main` and asks before it publishes the GitHub release `v<x.y.z>` from there, with generated notes. `.github/workflows/publish.yaml` then checks that the release matches the version, runs the checks and stages the version on npm, signing in through npm Trusted Publishing, so no token is involved. The task follows that run until it ends.
 3. `mise run release:approve` lists the staged versions, and `mise run release:approve <id>` approves one; npm asks for the one-time password. Only then is the version public. It needs `npm login` first. Approving on npmjs.com under Staged Packages works too.
 
