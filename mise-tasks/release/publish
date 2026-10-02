@@ -18,11 +18,11 @@ version=$(on_main version)
 tag=v$version
 
 if gh release view "$tag" > /dev/null 2>&1; then
-  echo "$tag is already released. For a new version, start with: mise run release:prepare <x.y.z>" >&2
+  echo "$tag is already released. For a new version, start with: mise run release:prepare <version>" >&2
   exit 2
 fi
 if npm view "$name@$version" version > /dev/null 2>&1; then
-  echo "$name@$version is already on npm. For a new version, start with: mise run release:prepare <x.y.z>" >&2
+  echo "$name@$version is already on npm. For a new version, start with: mise run release:prepare <version>" >&2
   exit 2
 fi
 
