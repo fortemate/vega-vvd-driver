@@ -10,7 +10,7 @@ The Vega SDK's `vega` command installs and launches apps on the Vega Virtual Dev
 
 This driver is for lighter jobs on the VVD: a key press or a screenshot from a shell script, a video with sound, every frame of an animation, and an AI coding agent that can see what it built. It talks to the Android emulator that the VVD is built on, through the emulator's own gRPC API and console, so there is nothing to install on the device and no server to run.
 
-Its methods were worked out while building [Dice Chess for Fire TV](https://github.com/fortemate/dicechess-tv): scripts drove whole sessions with nobody at the emulator, took every screenshot of the game's gallery, checked its move animations frame by frame and recorded its [demo video](https://www.youtube.com/watch?v=Q7wWAmUp2Sc). The obstacles on the way are in that project's [friction log](https://fortemate.github.io/dicechess-tv/friction-log/) for Amazon, as FL-08, FL-09 and FL-28.
+Its methods were worked out while building [Dice Chess for Fire TV](https://dicechess-tv.fortemate.com/): scripts drove whole sessions with nobody at the emulator, took every screenshot of the game's gallery, checked its move animations frame by frame and recorded its [demo video](https://youtu.be/LG_vw53uvQU). The obstacles on the way are in that project's [friction log](https://dicechess-tv.fortemate.com/friction-log/) for Amazon, as FL-08, FL-09 and FL-28.
 
 ## Appium or this driver?
 
