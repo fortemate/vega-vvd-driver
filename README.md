@@ -8,7 +8,7 @@ Drive the Vega Virtual Device from scripts and AI agents: press remote keys, tak
 
 The Vega SDK's `vega` command installs and launches apps on the Vega Virtual Device (VVD), but has no command to press a remote key or take a screenshot. On a Fire TV Stick, the device's own `gwsi-tool-screenshooter` takes one through `vega exec vda shell`, but the [VDA reference](https://developer.amazon.com/docs/vega/0.24/vda-tools.html) notes that the VVD doesn't support it. Amazon's [Appium Vega driver](https://developer.amazon.com/docs/vega/0.24/appium-install.html) does both, and much more: it runs UI tests that find elements, on the VVD and on a Fire TV Stick. It needs an Appium 2 server, the driver package and the device's automation toolkit switched on, with Node 22 or earlier.
 
-This driver is for lighter jobs on the VVD: a key press or a screenshot from a shell script, a video with sound, every frame of an animation, and an AI coding agent that can see what it built. It talks to the Android emulator that the VVD is built on, through the emulator's own gRPC API and console, so there is nothing to install on the device and no server to run.
+This driver is for lighter jobs on the VVD: a key press or a screenshot from a shell script, a video with sound, sampled frames of an animation, and an AI coding agent that can see what it built. It talks to the Android emulator that the VVD is built on, through the emulator's own gRPC API and console, so there is nothing to install on the device and no server to run.
 
 Its methods were worked out while building [Dice Chess for Fire TV](https://dicechess-tv.fortemate.com/): scripts drove whole sessions with nobody at the emulator, took every screenshot of the game's gallery, checked its move animations frame by frame and recorded its [demo video](https://youtu.be/LG_vw53uvQU). The obstacles on the way are in that project's [friction log](https://dicechess-tv.fortemate.com/friction-log/) for Amazon, as FL-08, FL-09 and FL-28.
 
@@ -20,7 +20,7 @@ Its methods were worked out while building [Dice Chess for Fire TV](https://dice
 | test on a Fire TV Stick                             |   ✅   |      —      |
 | press keys or take a screenshot from a shell script |   ✅   |     ✅      |
 | record a video with sound                           |   —    |     ✅      |
-| capture every frame of an animation                 |   —    |     ✅      |
+| capture distinct sampled frames of an animation     |   ◯    |     ✅      |
 | let an AI agent see and operate the VVD over MCP    |   —    |     ✅      |
 | check the TV safe area                              |   ◯    |     ✅      |
 
@@ -61,7 +61,7 @@ vvd record demo.mp4 --seconds 20
 | `vvd press <key…> [--gap 450]`                             | Presses remote keys in order: `up down left right ok back menu playpause rewind fastforward`, a `KEY_*` name or an evdev code. `down*3` repeats, `ok:down` and `ok:up` hold and release |
 | `vvd screenshot [file]`                                    | Saves the screen as a PNG                                                                                                                                                               |
 | `vvd record <file> [--seconds 10] [--fps 30] [--no-audio]` | Records the screen with sound to an MP4. Needs ffmpeg                                                                                                                                   |
-| `vvd frames <dir> [--seconds 3] [--max-frames 200]`        | Saves every distinct frame as a PNG, named by the emulator's time. The frames wait in memory until the capture ends: 6 MB each at the VVD's 1920x1080, and 2 GB at most                 |
+| `vvd frames <dir> [--seconds 3] [--max-frames 200]`        | Saves each distinct sampled frame as a PNG, named by the emulator's time. The frames wait in memory until the capture ends: 6 MB each at the VVD's 1920x1080, and 2 GB at most          |
 | `vvd wait-change [--timeout 5000]`                         | Exits 0 once the screen changes, 1 on timeout                                                                                                                                           |
 | `vvd safe-area [--background #rrggbb] [--margin 0.05]`     | Counts what sits in the outer 5% of each edge. Exits 0 when clear                                                                                                                       |
 | `vvd mcp`                                                  | Runs the MCP server on stdio                                                                                                                                                            |
@@ -112,9 +112,11 @@ device.close();
 
 `device.waitForChange()`, `device.frames()` and `checkSafeArea()` cover the rest. Every call has a deadline (10 seconds, or `callTimeoutMs` given to `Device.connect`), so a stuck emulator fails a call instead of hanging it. `press`, `waitForChange`, `frames` and `record` take an AbortSignal as `signal`, and a cancelled press still releases its key. `onStart` runs alongside the recording, which ends when both have. See `src/index.ts` for everything exported.
 
+`record` replaces an existing file by default; use `overwrite: false` to require a new file, including when another process creates the destination during capture. An unexpected audio-stream error fails the recording. A healthy stream from a silent device produces silence.
+
 ## Recipes
 
-**Check an animation.** Start `vvd frames ./frames --seconds 3`, then trigger the animation. Each distinct frame lands as a PNG named by the emulator's own clock. The frames wait in memory while the capture runs, about 6 MB each at 1080p, and are written when it ends, because encoding one takes 20 to 200 ms and the screen would go unwatched meanwhile. The capture stops at 200 frames, about 1.2 GB, unless `--max-frames` says otherwise, and in any case before the frames held pass 2 GB, 321 frames at 1080p; the frames it has are written either way. On the VVD on 28 September 2026, with SDK 0.24.12112, the 220 ms pawn slide of Dice Chess's first tutorial move came through with the pawn in flight in 4 to 6 frames, 23 to 55 ms apart. A screenshot takes longer while the screen changes, and that sets the pace.
+**Check an animation.** Start `vvd frames ./frames --seconds 3`, then trigger the animation. Each distinct sampled frame lands as a PNG named by the emulator's own clock. Screenshots are polled, so intermediate display frames can be missed. The frames wait in memory while the capture runs, about 6 MB each at 1080p, and are written when it ends, because encoding one takes 20 to 200 ms and the screen would go unwatched meanwhile. The capture stops at 200 frames, about 1.2 GB, unless `--max-frames` says otherwise, and in any case before the frames held pass 2 GB, 321 frames at 1080p; the frames it has are written either way. On the VVD on 28 September 2026, with SDK 0.24.12112, the 220 ms pawn slide of Dice Chess's first tutorial move came through with the pawn in flight in 4 to 6 frames, 23 to 55 ms apart. A screenshot takes longer while the screen changes, and that sets the pace.
 
 **Record a demo.** Script the presses, record while they run, and cut the best takes afterwards. Recording works without the device's window.
 

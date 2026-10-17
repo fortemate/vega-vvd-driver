@@ -301,6 +301,7 @@ export const createServer = (options: ServerOptions = {}): McpServer => {
           seconds,
           fps,
           audio,
+          overwrite: overwrite ?? false,
           signal,
         });
         return text(

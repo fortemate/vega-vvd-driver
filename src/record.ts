@@ -17,12 +17,13 @@ import { once } from 'node:events';
 import {
   accessSync,
   constants,
+  copyFileSync,
   mkdtempSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, extname, join, resolve } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { CALL_TIMEOUT_MS, type AudioPacket, type Device } from './device.ts';
@@ -33,6 +34,9 @@ export type RecordOptions = {
   seconds: number;
   fps?: number;
   audio?: boolean;
+  // Preserve an existing destination, including one created during capture.
+  // The library and CLI replace files by default; MCP passes false by default.
+  overwrite?: boolean;
   // Runs once the first frame is in, alongside the recording: for example, to
   // press keys. The recording resolves when both have finished.
   onStart?: () => void | Promise<void>;
@@ -248,10 +252,11 @@ export const record = async (
   device: Device,
   options: RecordOptions,
 ): Promise<RecordResult> => {
-  const { signal } = options;
+  const audioFailure = new AbortController();
+  const signal = options.signal
+    ? AbortSignal.any([options.signal, audioFailure.signal])
+    : audioFailure.signal;
   const output = outputPath(options.file);
-  // "file:" keeps ffmpeg from reading a name such as "http://…" as a URL.
-  const target = `file:${output}`;
   if (!(await hasFfmpeg()))
     throw new Error(
       'recording needs ffmpeg on the PATH (for example: brew install ffmpeg)',
@@ -259,6 +264,10 @@ export const record = async (
   const fps = options.fps ?? 30;
   const withAudio = options.audio ?? true;
   const work = mkdtempSync(join(tmpdir(), 'vvd-record-'));
+  const completed = join(work, `completed${extname(output)}`);
+  // Mux privately, then save with an exclusive create when overwrite is off.
+  // "file:" keeps ffmpeg from interpreting a local filename as a URL.
+  const target = `file:${completed}`;
   let encoder: ChildProcessByStdio<Writable, null, Readable> | undefined;
   let encoded: Promise<void> | undefined;
   let stopAudio: (() => AudioPacket[]) | undefined;
@@ -318,7 +327,9 @@ export const record = async (
       }
     };
 
-    stopAudio = withAudio ? device.listen() : undefined;
+    stopAudio = withAudio
+      ? device.listen({ onError: (error) => audioFailure.abort(error) })
+      : undefined;
     const startMs = Date.now();
     const endMs = startMs + options.seconds * 1000;
     let latest = first.data;
@@ -365,6 +376,7 @@ export const record = async (
     await abortable(encoded, signal);
     await abortable(started, signal);
 
+    let audioSeconds = 0;
     if (!withAudio) {
       await run(
         'ffmpeg',
@@ -374,39 +386,60 @@ export const record = async (
         ].flat(),
         signal,
       );
-      return { file: output, frames: written, screenshots, audioSeconds: 0 };
-    }
-    const raw = join(work, 'audio.raw');
-    writeFileSync(raw, assembleAudio(packets, startMs * 1000, options.seconds));
-    await run(
-      'ffmpeg',
-      [
-        ['-loglevel', 'error', '-y', '-i', video],
-        ['-f', 's16le', '-ar', String(SAMPLE_RATE), '-ac', '2', '-i', raw],
+    } else {
+      const raw = join(work, 'audio.raw');
+      writeFileSync(
+        raw,
+        assembleAudio(packets, startMs * 1000, options.seconds),
+      );
+      await run(
+        'ffmpeg',
         [
-          '-c:v',
-          'copy',
-          '-c:a',
-          'aac',
-          '-b:a',
-          '192k',
-          '-t',
-          String(options.seconds),
-          '-movflags',
-          '+faststart',
-        ],
-        [target],
-      ].flat(),
-      signal,
+          ['-loglevel', 'error', '-y', '-i', video],
+          ['-f', 's16le', '-ar', String(SAMPLE_RATE), '-ac', '2', '-i', raw],
+          [
+            '-c:v',
+            'copy',
+            '-c:a',
+            'aac',
+            '-b:a',
+            '192k',
+            '-t',
+            String(options.seconds),
+            '-movflags',
+            '+faststart',
+          ],
+          [target],
+        ].flat(),
+        signal,
+      );
+      audioSeconds = audioWithin(packets, startMs * 1000, options.seconds);
+    }
+    signal.throwIfAborted();
+    copyFileSync(
+      completed,
+      output,
+      options.overwrite === false ? constants.COPYFILE_EXCL : 0,
     );
     return {
       file: output,
       frames: written,
       screenshots,
-      audioSeconds: audioWithin(packets, startMs * 1000, options.seconds),
+      audioSeconds,
     };
+  } catch (error) {
+    // Stream helpers can wrap an abort in AbortError. Keep the actual audio
+    // failure (or the caller's cancellation reason) visible to the caller.
+    signal.throwIfAborted();
+    throw error;
   } finally {
-    stopAudio?.();
+    // A failed listener can throw again when stopped. Keep the original
+    // failure and always finish cleaning up the encoder and working files.
+    try {
+      stopAudio?.();
+    } catch {
+      // The recording is already failing.
+    }
     if (encoder?.exitCode === null && encoder.signalCode === null) {
       encoder.stdin.destroy();
       encoder.kill('SIGKILL');

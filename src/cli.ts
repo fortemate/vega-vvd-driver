@@ -31,7 +31,7 @@ Commands:
       --seconds <n>          default 10
       --fps <n>              default 30
       --no-audio             video only
-  frames <dir>               save every distinct frame as a PNG, to check animations;
+  frames <dir>               save distinct sampled frames as PNGs, to check animations;
                              frames wait in memory until the capture ends, 6 MB each
                              at 1080p, and it stops before they pass 2 GB
       --seconds <n>          default 3
@@ -128,7 +128,7 @@ export const MAX_FRAMES = 200;
 // whatever the screen's size: 321 frames at 1080p.
 export const MAX_BYTES = 2_000_000_000;
 
-// Captures every distinct frame for `durationMs`, then writes each to `dir`
+// Captures distinct sampled frames for `durationMs`, then writes each to `dir`
 // as frame-<ms>ms.png, the milliseconds on the emulator's clock from the
 // first frame. The frames wait in memory until the capture is over: encoding
 // one at 1080p takes 20 to 200 ms, and the next screenshot would wait for it.

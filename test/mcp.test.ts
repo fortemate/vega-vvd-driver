@@ -156,6 +156,28 @@ test('a cancelled press_keys stops pressing', () =>
     assert.ok(pressed < 200, `${pressed} key events`);
   }));
 
+test('a cancelled press_keys releases an explicit hold', () =>
+  withServer(async (client, fake) => {
+    const controller = new AbortController();
+    fake.onKey = () => controller.abort();
+    const pressing = client.callTool(
+      {
+        name: 'press_keys',
+        arguments: { keys: ['right:down', 'right:up'], gap_ms: 10000 },
+      },
+      undefined,
+      { signal: controller.signal },
+    );
+    await assert.rejects(pressing);
+    // Cancellation travels to the server asynchronously.
+    for (let i = 0; i < 100 && fake.keys.length < 2; i++)
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.deepEqual(fake.keys, [
+      { eventType: 'keydown', keyCode: 106 },
+      { eventType: 'keyup', keyCode: 106 },
+    ]);
+  }));
+
 test('record_video writes only local video files, and never over one', () =>
   withServer(async (client) => {
     const existing = join(mkdtempSync(join(tmpdir(), 'vvd-mcp-')), 'old.mp4');

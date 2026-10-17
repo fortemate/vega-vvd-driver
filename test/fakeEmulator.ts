@@ -46,11 +46,14 @@ export type FakeEmulator = {
   keys: KeyRequest[];
   authorizations: string[];
   screenshots: number;
+  onKey?: (key: KeyRequest) => void;
+  onScreenshot?: () => void;
   stop(): void;
 };
 
 export const startFakeEmulator = async (
   screen: Screen = 'changing',
+  options: { audio?: 'silent' | 'fail'; failKeyAt?: number } = {},
 ): Promise<FakeEmulator> => {
   const definition = loadSync(join(PROTO_DIR, 'emulator_controller.proto'), {
     keepCase: true,
@@ -88,6 +91,11 @@ export const startFakeEmulator = async (
         eventType: call.request.eventType,
         keyCode: call.request.keyCode,
       });
+      fake.onKey?.(fake.keys[fake.keys.length - 1]);
+      if (fake.keys.length === options.failKeyAt) {
+        callback({ code: status.UNAVAILABLE, details: 'key delivery failed' });
+        return;
+      }
       callback(null, {});
     },
     getScreenshot(
@@ -95,6 +103,7 @@ export const startFakeEmulator = async (
       callback: sendUnaryData<object>,
     ) {
       fake.screenshots += 1;
+      fake.onScreenshot?.();
       if (screen === 'silent') return;
       if (typeof screen === 'object' && fake.screenshots > screen.failAfter) {
         callback({
@@ -115,6 +124,14 @@ export const startFakeEmulator = async (
       });
     },
     streamAudio(call: ServerWritableStream<object, object>) {
+      if (options.audio === 'fail') {
+        call.emit('error', {
+          code: status.UNAVAILABLE,
+          details: 'audio transport failed',
+        });
+        return;
+      }
+      if (options.audio === 'silent') return;
       const timer = setInterval(
         () =>
           call.write({
