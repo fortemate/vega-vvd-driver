@@ -17,13 +17,16 @@ import { once } from 'node:events';
 import {
   accessSync,
   constants,
+  createReadStream,
+  createWriteStream,
   mkdtempSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, extname, join, resolve } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { CALL_TIMEOUT_MS, type AudioPacket, type Device } from './device.ts';
 
@@ -33,6 +36,9 @@ export type RecordOptions = {
   seconds: number;
   fps?: number;
   audio?: boolean;
+  // Preserve an existing destination, including one created during capture.
+  // The library and CLI replace files by default; MCP passes false by default.
+  overwrite?: boolean;
   // Runs once the first frame is in, alongside the recording: for example, to
   // press keys. The recording resolves when both have finished.
   onStart?: () => void | Promise<void>;
@@ -50,6 +56,7 @@ export type RecordResult = {
 };
 
 type Process = ChildProcessByStdio<Writable | null, null, Readable>;
+type Encoder = ChildProcessByStdio<Writable, null, Readable>;
 
 // Settles when the process has ended: resolves on exit code 0, and otherwise
 // rejects with the end of what it wrote to stderr.
@@ -244,25 +251,118 @@ const outputPath = (file: string): string => {
   return path;
 };
 
+// Combine caller cancellation and audio failure on Node 20.0-20.2 too. The
+// listener is removed after every outcome, including preflight failures.
+const recordingCancellation = (caller?: AbortSignal) => {
+  const controller = new AbortController();
+  const onAbort = () => controller.abort(caller?.reason);
+  if (caller?.aborted) onAbort();
+  else caller?.addEventListener('abort', onAbort, { once: true });
+  return {
+    signal: controller.signal,
+    abort: (reason: unknown) => controller.abort(reason),
+    dispose: () => caller?.removeEventListener('abort', onAbort),
+  };
+};
+
+// Complete the container privately before opening the caller's destination.
+const muxRecording = async (
+  work: string,
+  packets: AudioPacket[],
+  startMs: number,
+  options: RecordOptions,
+  signal: AbortSignal,
+) => {
+  const completed = join(work, `completed${extname(options.file)}`);
+  const args = ['-loglevel', 'error', '-y', '-i', join(work, 'video.mp4')];
+  let audioSeconds = 0;
+  if (options.audio ?? true) {
+    const raw = join(work, 'audio.raw');
+    writeFileSync(raw, assembleAudio(packets, startMs * 1000, options.seconds));
+    args.push(
+      '-f',
+      's16le',
+      '-ar',
+      String(SAMPLE_RATE),
+      '-ac',
+      '2',
+      '-i',
+      raw,
+      '-c:v',
+      'copy',
+      '-c:a',
+      'aac',
+      '-b:a',
+      '192k',
+      '-t',
+      String(options.seconds),
+    );
+    audioSeconds = audioWithin(packets, startMs * 1000, options.seconds);
+  } else args.push('-c', 'copy');
+  // "file:" keeps ffmpeg from interpreting a local filename as a URL.
+  args.push('-movflags', '+faststart', `file:${completed}`);
+  await run('ffmpeg', args, signal);
+  return { completed, audioSeconds };
+};
+
+const saveRecording = async (
+  completed: string,
+  output: string,
+  overwrite: boolean,
+  signal: AbortSignal,
+): Promise<void> => {
+  signal.throwIfAborted();
+  // Opening with w preserves existing permissions, ownership and ACLs; wx
+  // exclusively creates a new destination. Streaming keeps MCP responsive
+  // and cancellable without copying the temporary file's access mode.
+  await pipeline(
+    createReadStream(completed),
+    createWriteStream(output, { flags: overwrite ? 'w' : 'wx' }),
+    { signal },
+  );
+};
+
+const cleanupRecording = async (
+  encoder: Encoder | undefined,
+  encoded: Promise<void> | undefined,
+  stopAudio: (() => AudioPacket[]) | undefined,
+  work: string | undefined,
+): Promise<void> => {
+  // A failed listener can throw again when stopped. Preserve the primary
+  // failure while still cleaning up the encoder and working files.
+  try {
+    stopAudio?.();
+  } catch {
+    // The recording is already failing.
+  }
+  if (encoder?.exitCode === null && encoder.signalCode === null) {
+    encoder.stdin.destroy();
+    encoder.kill('SIGKILL');
+  }
+  await encoded?.catch(() => {});
+  if (work) rmSync(work, { recursive: true, force: true });
+};
+
 export const record = async (
   device: Device,
   options: RecordOptions,
 ): Promise<RecordResult> => {
-  const { signal } = options;
-  const output = outputPath(options.file);
-  // "file:" keeps ffmpeg from reading a name such as "http://…" as a URL.
-  const target = `file:${output}`;
-  if (!(await hasFfmpeg()))
-    throw new Error(
-      'recording needs ffmpeg on the PATH (for example: brew install ffmpeg)',
-    );
-  const fps = options.fps ?? 30;
-  const withAudio = options.audio ?? true;
-  const work = mkdtempSync(join(tmpdir(), 'vvd-record-'));
-  let encoder: ChildProcessByStdio<Writable, null, Readable> | undefined;
+  const cancellation = recordingCancellation(options.signal);
+  const { signal } = cancellation;
+  let work: string | undefined;
+  let encoder: Encoder | undefined;
   let encoded: Promise<void> | undefined;
   let stopAudio: (() => AudioPacket[]) | undefined;
   try {
+    signal.throwIfAborted();
+    const output = outputPath(options.file);
+    if (!(await hasFfmpeg()))
+      throw new Error(
+        'recording needs ffmpeg on the PATH (for example: brew install ffmpeg)',
+      );
+    const fps = options.fps ?? 30;
+    const withAudio = options.audio ?? true;
+    work = mkdtempSync(join(tmpdir(), 'vvd-record-'));
     const first = await device.screenshot('rgb', { signal });
     const video = join(work, 'video.mp4');
     encoder = spawn(
@@ -318,7 +418,9 @@ export const record = async (
       }
     };
 
-    stopAudio = withAudio ? device.listen() : undefined;
+    stopAudio = withAudio
+      ? device.listen({ onError: cancellation.abort })
+      : undefined;
     const startMs = Date.now();
     const endMs = startMs + options.seconds * 1000;
     let latest = first.data;
@@ -365,53 +467,27 @@ export const record = async (
     await abortable(encoded, signal);
     await abortable(started, signal);
 
-    if (!withAudio) {
-      await run(
-        'ffmpeg',
-        [
-          ['-loglevel', 'error', '-y', '-i', video],
-          ['-c', 'copy', '-movflags', '+faststart', target],
-        ].flat(),
-        signal,
-      );
-      return { file: output, frames: written, screenshots, audioSeconds: 0 };
-    }
-    const raw = join(work, 'audio.raw');
-    writeFileSync(raw, assembleAudio(packets, startMs * 1000, options.seconds));
-    await run(
-      'ffmpeg',
-      [
-        ['-loglevel', 'error', '-y', '-i', video],
-        ['-f', 's16le', '-ar', String(SAMPLE_RATE), '-ac', '2', '-i', raw],
-        [
-          '-c:v',
-          'copy',
-          '-c:a',
-          'aac',
-          '-b:a',
-          '192k',
-          '-t',
-          String(options.seconds),
-          '-movflags',
-          '+faststart',
-        ],
-        [target],
-      ].flat(),
+    const { completed, audioSeconds } = await muxRecording(
+      work,
+      packets,
+      startMs,
+      options,
       signal,
     );
+    await saveRecording(completed, output, options.overwrite ?? true, signal);
     return {
       file: output,
       frames: written,
       screenshots,
-      audioSeconds: audioWithin(packets, startMs * 1000, options.seconds),
+      audioSeconds,
     };
+  } catch (error) {
+    // Stream helpers can wrap an abort in AbortError. Keep the actual audio
+    // failure (or the caller's cancellation reason) visible to the caller.
+    signal.throwIfAborted();
+    throw error;
   } finally {
-    stopAudio?.();
-    if (encoder?.exitCode === null && encoder.signalCode === null) {
-      encoder.stdin.destroy();
-      encoder.kill('SIGKILL');
-    }
-    await encoded?.catch(() => {});
-    rmSync(work, { recursive: true, force: true });
+    cancellation.dispose();
+    await cleanupRecording(encoder, encoded, stopAudio, work);
   }
 };

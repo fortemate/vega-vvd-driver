@@ -68,6 +68,63 @@ test('a cancelled press stops, and never leaves a key held down', () =>
     assert.equal(ups, downs);
   }));
 
+test('cancelling an explicit hold releases every key held by the sequence', () =>
+  withDevice('changing', async (device, fake) => {
+    const controller = new AbortController();
+    fake.onKey = (key) => {
+      if (key.eventType === 'keydown' && key.keyCode === 106)
+        controller.abort();
+    };
+    await assert.rejects(
+      device.press(['left:down', 'right:down', 'right:up'], {
+        gapMs: 0,
+        signal: controller.signal,
+      }),
+      { name: 'AbortError' },
+    );
+    for (const keyCode of [105, 106])
+      assert.ok(
+        fake.keys.some(
+          (key) => key.keyCode === keyCode && key.eventType === 'keyup',
+        ),
+        `key ${keyCode} was released`,
+      );
+  }));
+
+test('a failed sequence releases explicit holds and preserves the failure', async () => {
+  const fake = await startFakeEmulator('changing', { failKeyAt: 2 });
+  const device = Device.connect({
+    directories: [fake.directory],
+    protoDirectory: PROTO_DIR,
+  });
+  try {
+    await assert.rejects(
+      device.press(['left:down', 'right:down'], { gapMs: 0 }),
+      /key delivery failed/,
+    );
+    for (const keyCode of [105, 106])
+      assert.ok(
+        fake.keys.some(
+          (key) => key.keyCode === keyCode && key.eventType === 'keyup',
+        ),
+      );
+  } finally {
+    device.close();
+    fake.stop();
+  }
+});
+
+test('a successful explicit hold remains held until a later release', () =>
+  withDevice('changing', async (device, fake) => {
+    await device.press(['right:down'], { gapMs: 0 });
+    assert.deepEqual(fake.keys, [{ eventType: 'keydown', keyCode: 106 }]);
+    await device.press(['right:up'], { gapMs: 0 });
+    assert.deepEqual(fake.keys, [
+      { eventType: 'keydown', keyCode: 106 },
+      { eventType: 'keyup', keyCode: 106 },
+    ]);
+  }));
+
 test('a device that never answers fails at the deadline instead of hanging', () =>
   withDevice(
     'silent',
@@ -247,6 +304,63 @@ test('the audio stream delivers timed packets until stopped', () =>
     assert.ok(packets.length > 3);
     assert.ok(packets[0].timestampUs > 0);
     assert.equal(stop(), packets); // stopping again is harmless
+  }));
+
+test('an unexpected audio stream failure is reported to the listener', async () => {
+  const fake = await startFakeEmulator('changing', { audio: 'fail' });
+  const device = Device.connect({
+    directories: [fake.directory],
+    protoDirectory: PROTO_DIR,
+  });
+  try {
+    let failed!: (error: Error) => void;
+    const error = new Promise<Error>((resolve) => {
+      failed = resolve;
+    });
+    const stop = device.listen({ onError: failed });
+    const timeout = setTimeout(
+      () => failed(new Error('no audio error received')),
+      1000,
+    );
+    const failure = await error;
+    clearTimeout(timeout);
+    assert.match(failure.message, /audio transport failed/);
+    assert.throws(stop, /audio transport failed/);
+  } finally {
+    device.close();
+    fake.stop();
+  }
+});
+
+test('stopping a silent audio stream is not an audio failure', async () => {
+  const fake = await startFakeEmulator('changing', { audio: 'silent' });
+  const device = Device.connect({
+    directories: [fake.directory],
+    protoDirectory: PROTO_DIR,
+  });
+  const failures: Error[] = [];
+  try {
+    const stop = device.listen({ onError: (error) => failures.push(error) });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.deepEqual(stop(), []);
+    assert.deepEqual(stop(), []);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.deepEqual(failures, []);
+  } finally {
+    device.close();
+    fake.stop();
+  }
+});
+
+test('closing the device intentionally stops its audio streams', () =>
+  withDevice('changing', async (device) => {
+    const failures: Error[] = [];
+    const stop = device.listen({ onError: (error) => failures.push(error) });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    device.close();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.deepEqual(failures, []);
+    assert.doesNotThrow(stop);
   }));
 
 test('the token stays out of JSON, inspect and spreads', () =>

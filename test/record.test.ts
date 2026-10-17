@@ -11,11 +11,17 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { AudioPacket, Device } from '../src/device.ts';
+import { Device as GrpcDevice } from '../src/device.ts';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { createServer } from '../src/mcp.ts';
+import { PROTO_DIR, startFakeEmulator } from './fakeEmulator.ts';
 import { record } from '../src/record.ts';
 
 const realPath = process.env.PATH;
@@ -30,6 +36,8 @@ writeFileSync(
     '[ "$1" = "-version" ] && exit 0',
     `echo $$ >> '${pidFile}'`,
     'if [ "$FAKE_FFMPEG" = fail ]; then echo "Unknown encoder libx264" >&2; exit 1; fi',
+    'for target do :; done',
+    'case "$target" in file:*) printf "fake video" > "${target#file:}"; chmod 644 "${target#file:}";; esac',
     'exec cat > /dev/null',
     '',
   ].join('\n'),
@@ -174,6 +182,151 @@ test('a directory that cannot be written fails before anything is recorded', asy
   );
   assert.equal(device.shots(), 0);
 });
+
+for (const audio of [false, true]) {
+  test(`replacing a recording preserves its access mode (audio=${audio})`, () =>
+    clean(async () => {
+      for (const overwrite of [undefined, true]) {
+        const file = out();
+        writeFileSync(file, 'private recording');
+        chmodSync(file, 0o600);
+        await record(fakeDevice(), {
+          file,
+          seconds: 0.1,
+          audio,
+          overwrite,
+        });
+        assert.equal(statSync(file).mode & 0o777, 0o600);
+        assert.equal(readFileSync(file, 'utf8'), 'fake video');
+      }
+    }));
+
+  test(`overwrite:false saves a new recording (audio=${audio})`, () =>
+    clean(async () => {
+      const file = out();
+      await record(fakeDevice(), {
+        file,
+        seconds: 0.1,
+        audio,
+        overwrite: false,
+      });
+      assert.equal(readFileSync(file, 'utf8'), 'fake video');
+    }));
+
+  test(`a file created during capture survives overwrite:false (audio=${audio})`, () =>
+    clean(async () => {
+      const file = out();
+      await assert.rejects(
+        record(fakeDevice(), {
+          file,
+          seconds: 0.1,
+          audio,
+          overwrite: false,
+          onStart: () => writeFileSync(file, 'keep me'),
+        }),
+        { code: 'EEXIST' },
+      );
+      assert.equal(readFileSync(file, 'utf8'), 'keep me');
+    }));
+
+  test(`overwrite:true can replace a file created during capture (audio=${audio})`, () =>
+    clean(async () => {
+      const file = out();
+      await record(fakeDevice(), {
+        file,
+        seconds: 0.1,
+        audio,
+        overwrite: true,
+        onStart: () => writeFileSync(file, 'replace me'),
+      });
+      assert.equal(readFileSync(file, 'utf8'), 'fake video');
+    }));
+}
+
+test('the library still replaces files by default', () =>
+  clean(async () => {
+    const file = out();
+    writeFileSync(file, 'replace me');
+    await record(fakeDevice(), { file, seconds: 0.1 });
+    assert.equal(readFileSync(file, 'utf8'), 'fake video');
+  }));
+
+test('MCP preserves a file created during capture unless overwrite is explicit', () =>
+  clean(async () => {
+    const fake = await startFakeEmulator();
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await createServer({
+      directories: [fake.directory],
+      protoDirectory: PROTO_DIR,
+    }).connect(serverSide);
+    const client = new Client({ name: 'test', version: '0' });
+    await client.connect(clientSide);
+    try {
+      for (const overwrite of [undefined, false, true]) {
+        const file = out();
+        let created = false;
+        fake.onScreenshot = () => {
+          if (created) return;
+          created = true;
+          writeFileSync(file, 'keep me');
+        };
+        const result = await client.callTool({
+          name: 'record_video',
+          arguments: { file, seconds: 1, audio: false, overwrite },
+        });
+        assert.equal(result.isError === true, overwrite !== true);
+        assert.equal(
+          readFileSync(file, 'utf8'),
+          overwrite ? 'fake video' : 'keep me',
+        );
+      }
+    } finally {
+      await client.close();
+      fake.stop();
+    }
+  }));
+
+test('an audio transport failure stops recording and cleans up', () =>
+  clean(async () => {
+    const fake = await startFakeEmulator('changing', { audio: 'fail' });
+    const device = GrpcDevice.connect({
+      directories: [fake.directory],
+      protoDirectory: PROTO_DIR,
+    });
+    const file = out();
+    try {
+      await assert.rejects(
+        record(device, { file, seconds: 10 }),
+        /audio transport failed/,
+      );
+      assert.ok(!existsSync(file));
+    } finally {
+      device.close();
+      fake.stop();
+    }
+  }));
+
+test('silent and audio-disabled recordings do not fail for lack of audio packets', () =>
+  clean(async () => {
+    for (const audio of ['silent', 'fail'] as const) {
+      const fake = await startFakeEmulator('changing', { audio });
+      const device = GrpcDevice.connect({
+        directories: [fake.directory],
+        protoDirectory: PROTO_DIR,
+      });
+      try {
+        const result = await record(device, {
+          file: out(),
+          seconds: 0.1,
+          audio: audio === 'silent',
+        });
+        assert.equal(result.audioSeconds, 0);
+      } finally {
+        device.close();
+        fake.stop();
+      }
+    }
+  }));
 
 const realFfmpeg =
   spawnSync('ffmpeg', ['-version'], { env: { PATH: realPath } }).status === 0;

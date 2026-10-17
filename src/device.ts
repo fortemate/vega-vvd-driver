@@ -161,8 +161,9 @@ export class Device {
 
   // Ends the audio streams that are still open, then the connection.
   close(): void {
-    for (const stream of this.#streams) stream.cancel();
+    const streams = [...this.#streams];
     this.#streams.clear();
+    for (const stream of streams) stream.cancel();
     this.#client.close();
   }
 
@@ -222,27 +223,35 @@ export class Device {
     const { signal } = options;
     const gap = options.gapMs ?? 450;
     const hold = options.holdMs ?? 90;
-    for (const step of steps) {
-      signal?.throwIfAborted();
-      if (step.half === 'press') {
-        let released = false;
-        try {
+    const held = new Set<number>();
+    try {
+      for (const step of steps) {
+        signal?.throwIfAborted();
+        // Track before sending: the device may receive a key even if the
+        // reply is lost or the call is cancelled. A failed release is retried.
+        held.add(step.code);
+        if (step.half === 'press') {
           await this.#sendKey(step.code, 'keydown', { signal });
           await sleep(hold, undefined, { signal });
           await this.#sendKey(step.code, 'keyup');
-          released = true;
-        } finally {
-          if (!released)
-            await this.#sendKey(step.code, 'keyup').catch(() => {});
+          held.delete(step.code);
+        } else {
+          await this.#sendKey(
+            step.code,
+            step.half === 'down' ? 'keydown' : 'keyup',
+            { signal },
+          );
+          if (step.half === 'up') held.delete(step.code);
         }
-      } else {
-        await this.#sendKey(
-          step.code,
-          step.half === 'down' ? 'keydown' : 'keyup',
-          { signal },
-        );
+        await sleep(gap, undefined, { signal });
       }
-      await sleep(gap, undefined, { signal });
+    } catch (error) {
+      // Successful explicit holds survive the call. Interrupted sequences
+      // release their keys without the aborted signal or masking the failure.
+      await Promise.allSettled(
+        [...held].map((code) => this.#sendKey(code, 'keyup')),
+      );
+      throw error;
     }
   }
 
@@ -311,7 +320,7 @@ export class Device {
     return false;
   }
 
-  // Calls `onFrame` with every distinct frame for `durationMs`, or until
+  // Calls `onFrame` with each distinct sampled frame for `durationMs`, or until
   // `maxFrames` of them have come; `maxFrames` is a whole number from 1, and
   // anything else is refused before the first screenshot. Useful to check an
   // animation: on the VVD a screenshot takes 23 to 61 ms while the screen
@@ -358,9 +367,13 @@ export class Device {
   // Returns a function that stops the stream and gives back the packets that
   // arrived, each with the time it was captured; calling it again gives the
   // same packets. The emulator sends nothing while the device is silent, so
-  // the packets can have gaps; see assembleAudio in record.ts.
-  listen(): () => AudioPacket[] {
+  // the packets can have gaps; see assembleAudio in record.ts. Unexpected
+  // errors call onError immediately and are thrown by the stop function.
+  listen(
+    options: { onError?: (error: Error) => void } = {},
+  ): () => AudioPacket[] {
     const packets: AudioPacket[] = [];
+    let failure: Error | undefined;
     const stream = this.#client.streamAudio(
       {
         samplingRate: 44100,
@@ -378,11 +391,21 @@ export class Device {
           pcm: packet.audio,
         });
     });
-    stream.on('error', () => {
-      // Cancelling the stream ends it with an error; nothing to report.
+    stream.on('error', (error: Error) => {
+      // Only our own stop/close is an expected cancellation. A server-side
+      // cancellation or another transport error means audio has been lost.
+      if (!this.#streams.has(stream) || failure) return;
+      failure = new Error(
+        `the device's audio stream failed: ${error.message}`,
+        {
+          cause: error,
+        },
+      );
+      options.onError?.(failure);
     });
     return () => {
       if (this.#streams.delete(stream)) stream.cancel();
+      if (failure) throw failure;
       return packets;
     };
   }

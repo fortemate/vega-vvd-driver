@@ -28,6 +28,16 @@ jobs:
       - run: npm run build
       # The package that npm would publish: the CLI must start from it.
       - run: node dist/bin.js --version
+      # Exercise the built library and MCP path without TypeScript stripping
+      # or newer AbortSignal helpers. Node >=20 includes these early releases.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '20.2.0'
+          package-manager-cache: false
+      - name: Check compatibility with Node 20.2
+        run: |
+          node --version
+          npm run test:compat
 
   # SonarQube Cloud analyses the repository from here, with the tests'
   # coverage; its Automatic Analysis is off, as the two cannot run side by
