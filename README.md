@@ -112,7 +112,7 @@ device.close();
 
 `device.waitForChange()`, `device.frames()` and `checkSafeArea()` cover the rest. Every call has a deadline (10 seconds, or `callTimeoutMs` given to `Device.connect`), so a stuck emulator fails a call instead of hanging it. `press`, `waitForChange`, `frames` and `record` take an AbortSignal as `signal`, and a cancelled press still releases its key. `onStart` runs alongside the recording, which ends when both have. See `src/index.ts` for everything exported.
 
-`record` replaces an existing file by default; use `overwrite: false` to require a new file, including when another process creates the destination during capture. An unexpected audio-stream error fails the recording. A healthy stream from a silent device produces silence.
+`record` replaces an existing file by default; use `overwrite: false` to require a new file, including when another process creates the destination during capture. An unexpected audio-stream error fails the recording, and a healthy stream from a silent device produces silence (both covered by unit tests against a fake emulator).
 
 ## Recipes
 

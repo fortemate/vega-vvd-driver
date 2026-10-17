@@ -11,7 +11,9 @@ mise run setup        # npm ci, and the Git hooks
 mise run check        # types, format, tests and the build, as CI runs them
 ```
 
-Without mise: `npm ci`, then `npm run check`, `npm run format:check`, `npm test` and `npm run build`.
+Without mise: `npm ci`, then `npm run check`, `npm run format:check`, `npm test`, `npm run build` and `npm run test:compat`.
+
+After building, `npm run test:compat` tests the published JavaScript library and MCP recording path without a device or ffmpeg. CI runs it on Node 20.2.0 to check the declared Node 20 runtime support, including caller cancellation and listener cleanup.
 
 The unit tests need neither a device nor ffmpeg. A fake EmulatorController on localhost (`test/fakeEmulator.ts`, with a minimal proto written for the tests), small fake consoles and a stand-in ffmpeg script cover the gRPC, console and recording paths, failures included.
 

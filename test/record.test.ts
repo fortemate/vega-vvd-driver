@@ -11,6 +11,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -36,7 +37,7 @@ writeFileSync(
     `echo $$ >> '${pidFile}'`,
     'if [ "$FAKE_FFMPEG" = fail ]; then echo "Unknown encoder libx264" >&2; exit 1; fi',
     'for target do :; done',
-    'case "$target" in file:*) printf "fake video" > "${target#file:}";; esac',
+    'case "$target" in file:*) printf "fake video" > "${target#file:}"; chmod 644 "${target#file:}";; esac',
     'exec cat > /dev/null',
     '',
   ].join('\n'),
@@ -183,6 +184,23 @@ test('a directory that cannot be written fails before anything is recorded', asy
 });
 
 for (const audio of [false, true]) {
+  test(`replacing a recording preserves its access mode (audio=${audio})`, () =>
+    clean(async () => {
+      for (const overwrite of [undefined, true]) {
+        const file = out();
+        writeFileSync(file, 'private recording');
+        chmodSync(file, 0o600);
+        await record(fakeDevice(), {
+          file,
+          seconds: 0.1,
+          audio,
+          overwrite,
+        });
+        assert.equal(statSync(file).mode & 0o777, 0o600);
+        assert.equal(readFileSync(file, 'utf8'), 'fake video');
+      }
+    }));
+
   test(`overwrite:false saves a new recording (audio=${audio})`, () =>
     clean(async () => {
       const file = out();

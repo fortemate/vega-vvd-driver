@@ -15,12 +15,13 @@ description = "📦 Install the dependencies and register the Git hooks"
 run = ["npm ci", "lefthook install"]
 
 [tasks.check]
-description = "✅ Run every check CI runs: types, format, tests and the build"
+description = "✅ Run types, format, tests, build and runtime compatibility tests"
 run = [
   "npm run check",
   "npm run format:check",
   "npm test",
   "npm run build",
+  "npm run test:compat",
 ]
 
 [tasks."device:start"]
