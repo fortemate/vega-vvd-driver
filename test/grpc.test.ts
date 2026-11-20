@@ -174,6 +174,54 @@ test('frames stops after maxFrames distinct frames', () =>
     assert.ok(Date.now() - started < 1500);
   }));
 
+test(
+  'frames waits for each asynchronous consumer before requesting the next frame',
+  { timeout: 5000 },
+  () =>
+    withDevice('changing', async (device) => {
+      const screenshot = device.screenshot.bind(device);
+      let requested = 0;
+      device.screenshot = (...args: Parameters<Device['screenshot']>) => {
+        requested += 1;
+        return screenshot(...args);
+      };
+      let entered!: () => void;
+      let release!: () => void;
+      const firstConsumerEntered = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const consumerReady = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let delivered = 0;
+      const capturing = device.frames(
+        10000,
+        async () => {
+          delivered += 1;
+          if (delivered === 1) {
+            entered();
+            await consumerReady;
+          }
+        },
+        { maxFrames: 2 },
+      );
+      try {
+        await firstConsumerEntered;
+        assert.equal(delivered, 1);
+        assert.equal(
+          requested,
+          1,
+          'The next screenshot must wait for the consumer',
+        );
+      } finally {
+        release();
+        assert.equal(await capturing, 2);
+      }
+      assert.equal(delivered, 2);
+      assert.equal(requested, 2);
+    }),
+);
+
 test('frames refuses a maxFrames that is not a whole number from 1', () =>
   withDevice('changing', async (device, fake) => {
     let delivered = 0;
