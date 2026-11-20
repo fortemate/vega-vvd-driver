@@ -99,7 +99,7 @@ export const createServer = (options: ServerOptions = {}): McpServer => {
         'Lists the running Vega Virtual Devices whose gRPC endpoint is on. An empty list usually means gRPC is off: call enable_grpc.',
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
-    async () => {
+    () => {
       const devices = findEmulators({ directories: options.directories }).map(
         ({ pid, grpcPort, consolePort, avdName }) => ({
           pid,
